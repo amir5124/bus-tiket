@@ -7,6 +7,17 @@ const listCities = asyncHandler(async (req, res) => {
   ok(res, rows);
 });
 
+/** Daftar metode pembayaran aktif (untuk halaman checkout) */
+const listPaymentMethods = asyncHandler(async (req, res) => {
+  const { rows } = await query(
+    `SELECT id, code, name, type, icon, fee_flat, sort_order
+       FROM payment_methods
+      WHERE is_active = 1
+      ORDER BY sort_order, name`
+  );
+  ok(res, rows);
+});
+
 /** Daftar fasilitas master (untuk filter pencarian) */
 const listFacilities = asyncHandler(async (req, res) => {
   const { rows } = await query(`SELECT * FROM facilities ORDER BY name`);
@@ -135,5 +146,5 @@ const getVendorPublicProfile = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  listCities, listFacilities, searchSchedules, getScheduleDetail, getVendorPublicProfile,
+  listCities, listFacilities, searchSchedules, getScheduleDetail, getVendorPublicProfile, listPaymentMethods
 };

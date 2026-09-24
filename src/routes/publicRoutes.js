@@ -13,7 +13,8 @@ router.get('/schedules/search', optionalAuth, publicCtrl.searchSchedules);
 
 // GET /api/public/schedules/:id  -> detail jadwal + armada lengkap + denah kursi
 router.get('/schedules/:id', publicCtrl.getScheduleDetail);
-
+// GET /api/public/payment-methods  -> daftar metode pembayaran aktif
+router.get('/payment-methods', publicCtrl.listPaymentMethods);
 // GET /api/public/vendors/:id  -> profil publik vendor + daftar armadanya
 router.get('/vendors/:id', publicCtrl.getVendorPublicProfile);
 
