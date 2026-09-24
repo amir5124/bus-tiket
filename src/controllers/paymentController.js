@@ -4,7 +4,7 @@ const moment = require('moment-timezone');
 const { query } = require('../config/db');
 
 // =====================================================================
-// Kredensial dari .env (fallback ke nilai testing LinkQu)
+// Kredensial dari .env
 // =====================================================================
 const config = {
   clientId: process.env.LINKQU_CLIENT_ID || 'testing',
@@ -18,43 +18,52 @@ const config = {
 const PAID = ['SUCCESS', 'SETTLED', 'PAID'];
 
 // =====================================================================
-// SIGNATURE LINKQU
+// SIGNATURE — Contek dari backend topup yang WORK
 // ---------------------------------------------------------------------
-// Rumus resmi LinkQu:
-//   stringToSign = path + method + lowercase(clean(values + clientId))
-//   signature    = HMAC_SHA256(serverKey, stringToSign).hex()
-//
-// Urutan values PERSIS (dari dokumentasi LinkQu VA/QRIS):
-//   amount + expired + partner_reff + customer_id + customer_name + customer_email
-//   [+ bank_code] (khusus VA)
-//
-// CATATAN: username, pin, url_callback TIDAK ikut di-signature.
+// URUTAN FIELD (VA): amount + expired + bank_code + partner_reff + customer_id + customer_name + customer_email + clientId
+// URUTAN FIELD (QRIS): amount + expired + partner_reff + customer_id + customer_name + customer_email + clientId
 // =====================================================================
-function generateSignature(path, method, fields) {
-  // Susun value PERSIS sesuai urutan LinkQu
-  const ordered = [
-    fields.amount,
-    fields.expired,
-    fields.partner_reff,
-    fields.customer_id,
-    fields.customer_name,
-    fields.customer_email,
-    fields.bank_code,   // undefined utk QRIS → join('') menghasilkan string kosong
-  ];
+function cleanValue(str) {
+  return String(str).replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+}
 
-  const rawValue = ordered.join('') + config.clientId;
-  const cleaned = rawValue.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
-  const stringToSign = path + method + cleaned;
+function hmac256(serverKey, data) {
+  return crypto.createHmac('sha256', serverKey).update(data).digest('hex');
+}
 
-  if (process.env.NODE_ENV !== 'production') {
-    console.log('[SIGN] rawValue    :', rawValue);
-    console.log('[SIGN] cleaned     :', cleaned);
-    console.log('[SIGN] stringToSign:', stringToSign);
-  }
+function generateSignatureVA(fields) {
+  const path = '/transaction/create/va';
+  const method = 'POST';
+  const raw = cleanValue(
+    fields.amount +
+    fields.expired +
+    fields.bank_code +      // ← POSISI KE-3, SEBELUM partner_reff
+    fields.partner_reff +
+    fields.customer_id +
+    fields.customer_name +
+    fields.customer_email +
+    config.clientId
+  );
+  const stringToSign = path + method + raw;
+  console.log('[SIGN-VA] stringToSign:', stringToSign);
+  return hmac256(config.serverKey, stringToSign);
+}
 
-  return crypto.createHmac('sha256', config.serverKey)
-    .update(stringToSign)
-    .digest('hex');
+function generateSignatureQRIS(fields) {
+  const path = '/transaction/create/qris';
+  const method = 'POST';
+  const raw = cleanValue(
+    fields.amount +
+    fields.expired +
+    fields.partner_reff +
+    fields.customer_id +
+    fields.customer_name +
+    fields.customer_email +
+    config.clientId
+  );
+  const stringToSign = path + method + raw;
+  console.log('[SIGN-QRIS] stringToSign:', stringToSign);
+  return hmac256(config.serverKey, stringToSign);
 }
 
 // =====================================================================
@@ -86,7 +95,6 @@ const createPayment = async (req, res) => {
       return res.status(400).json({ status: 'Error', message: 'method harus VA (dengan bank_code) atau QRIS' });
     }
 
-    // Ambil booking + sisa waktu (ttl) dihitung dari DB, bukan dari server Node
     const { rows: booking } = await query(
       `SELECT b.*, TIMESTAMPDIFF(SECOND, NOW(), b.expires_at) AS ttl
          FROM bookings b
@@ -105,7 +113,6 @@ const createPayment = async (req, res) => {
       return res.status(409).json({ status: 'Error', message: 'Waktu pemesanan sudah habis atau hampir habis' });
     }
 
-    // NOMINAL DIHITUNG SERVER dari booking — bukan dari body request
     const adminFee = Math.min(
       Math.max(Math.round(Number(admin_fee_applied) || 0), 0),
       Number(process.env.MAX_ADMIN_FEE || 10000)
@@ -120,7 +127,6 @@ const createPayment = async (req, res) => {
     const phone = normalizePhone(customer_phone || b.contact_phone);
     const partner_reff = `PAY-BUS-${Date.now()}`;
 
-    // Kode bayar tidak boleh hidup lebih lama dari masa tahan kursi (selisih 60 detik)
     const expired = moment.tz('Asia/Jakarta')
       .add(b.ttl - 60, 'seconds')
       .format('YYYYMMDDHHmmss');
@@ -128,29 +134,47 @@ const createPayment = async (req, res) => {
     const callback = process.env.LINKQU_CALLBACK_URL
       || `${process.env.BASE_URL || 'https://bus.siappgo.id'}/api/payments/callback`;
 
-    const endpoint = method === 'VA' ? '/transaction/create/va' : '/transaction/create/qris';
+    // ---- Hitung signature sesuai urutan LinkQu ----
+    let signature;
+    if (method === 'VA') {
+      signature = generateSignatureVA({
+        amount: finalAmount,
+        expired,
+        bank_code,
+        partner_reff,
+        customer_id: phone,
+        customer_name: finalCustomerName,
+        customer_email: finalCustomerEmail,
+      });
+    } else {
+      signature = generateSignatureQRIS({
+        amount: finalAmount,
+        expired,
+        partner_reff,
+        customer_id: phone,
+        customer_name: finalCustomerName,
+        customer_email: finalCustomerEmail,
+      });
+    }
 
-    // ---- Field yang di-signature (urutan sesuai docs LinkQu) ----
-    const signFields = {
+    // ---- Payload ----
+    const payload = {
       amount: finalAmount,
-      expired,
-      partner_reff,
       customer_id: phone,
       customer_name: finalCustomerName,
       customer_email: finalCustomerEmail,
-      ...(method === 'VA' ? { bank_code } : {}),
-    };
-
-    // ---- Payload yang dikirim ke LinkQu ----
-    const payload = {
-      ...signFields,
+      customer_phone: phone,
+      partner_reff,
       username: config.username,
       pin: config.pin,
+      expired,
+      signature,
       url_callback: callback,
     };
-    payload.signature = generateSignature(endpoint, 'POST', signFields);
+    if (method === 'VA') payload.bank_code = bank_code;
 
-    // Log payload (mask PIN)
+    const endpoint = method === 'VA' ? '/transaction/create/va' : '/transaction/create/qris';
+
     console.log('[LinkQu] POST', config.baseUrl + endpoint);
     console.log('[LinkQu] Payload:', JSON.stringify({ ...payload, pin: '***' }));
 
@@ -164,13 +188,13 @@ const createPayment = async (req, res) => {
           'Content-Type': 'application/json',
         },
         validateStatus: s => s < 600,
+        timeout: 30000,
       }
     );
 
     const data = resp.data;
     console.log('[LinkQu] Response:', JSON.stringify(data));
 
-    // LinkQu bisa balas HTTP 200 tapi response_code bukan '00'
     if (data.response_code && data.response_code !== '00') {
       return res.status(400).json({
         status: 'Error',
@@ -187,7 +211,6 @@ const createPayment = async (req, res) => {
 
     const expiredAt = moment(expired, 'YYYYMMDDHHmmss').format('YYYY-MM-DD HH:mm:ss');
 
-    // ---- Simpan / update ke bus_payments ----
     const { rows: existing } = await query(
       `SELECT id FROM bus_payments
         WHERE booking_id = ? AND payment_status = 'PENDING'
@@ -208,7 +231,7 @@ const createPayment = async (req, res) => {
           WHERE id = ?`,
         [
           partner_reff,
-          method === 'VA' ? `VA-${bank_code || ''}` : 'QRIS',
+          method === 'VA' ? `VA-${bank_code}` : 'QRIS',
           va, qr, adminFee, finalAmount, expiredAt,
           existing[0].id,
         ]
@@ -221,7 +244,7 @@ const createPayment = async (req, res) => {
          VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, NOW())`,
         [
           b.id, partner_reff,
-          method === 'VA' ? `VA-${bank_code || ''}` : 'QRIS',
+          method === 'VA' ? `VA-${bank_code}` : 'QRIS',
           va, qr, adminFee, finalAmount, expiredAt,
         ]
       );
@@ -252,22 +275,19 @@ const createPayment = async (req, res) => {
 };
 
 // =====================================================================
-// GET status ke LinkQu (server-to-server) — jangan percaya body callback mentah
+// Check status ke LinkQu
 // =====================================================================
 async function fetchGatewayStatus(reff) {
   const resp = await axios.get(
     `${config.baseUrl}/transaction/check-status`,
     {
-      params: {
-        partner_reff: reff,
-        username: config.username,
-        pin: config.pin,
-      },
+      params: { partner_reff: reff, username: config.username, pin: config.pin },
       headers: {
         'client-id': config.clientId,
         'client-secret': config.clientSecret,
       },
       validateStatus: s => s < 500,
+      timeout: 30000,
     }
   );
   return resp.data || {};
@@ -278,9 +298,6 @@ const isSuccess = (d) =>
   || d.response_code === '00'
   || String(d.response_desc || '').toUpperCase().includes('SUCCESS');
 
-// =====================================================================
-// Tandai booking sebagai paid (idempoten)
-// =====================================================================
 const markPaid = async (partner_reff) => {
   const { rows } = await query(
     `SELECT p.booking_id, p.amount, p.admin_fee, p.payment_status,
@@ -296,7 +313,6 @@ const markPaid = async (partner_reff) => {
 
   if (PAID.includes(String(p.payment_status).toUpperCase())) return p.booking_id;
 
-  // Nominal harus cukup (amount - admin_fee >= total booking)
   if (Number(p.amount) - Number(p.admin_fee || 0) < Number(p.total_amount)) {
     console.error('[PAYMENT] nominal kurang dari total booking', partner_reff);
     return null;
@@ -311,13 +327,10 @@ const markPaid = async (partner_reff) => {
   );
 
   if (p.booking_status !== 'pending_payment') {
-    console.error(
-      `[PAYMENT] ${partner_reff} dibayar, tapi booking ${p.booking_id} berstatus ${p.booking_status}. Perlu refund manual.`
-    );
+    console.error(`[PAYMENT] ${partner_reff} dibayar, tapi booking ${p.booking_id} berstatus ${p.booking_status}.`);
     return null;
   }
 
-  // Update booking → paid, hitung komisi
   await query(
     `UPDATE bookings b
        JOIN vendors v ON v.id = b.vendor_id
@@ -331,14 +344,10 @@ const markPaid = async (partner_reff) => {
   return p.booking_id;
 };
 
-// =====================================================================
-// POST /api/payments/callback
-// =====================================================================
 const handleCallback = async (req, res) => {
   try {
     const { partner_reff } = req.body || {};
     console.log('[PAYMENT CALLBACK] received:', partner_reff, req.body);
-
     if (partner_reff && isSuccess(await fetchGatewayStatus(partner_reff))) {
       const bookingId = await markPaid(partner_reff);
       console.log('[PAYMENT CALLBACK] marked paid:', partner_reff, 'booking:', bookingId);
@@ -350,9 +359,6 @@ const handleCallback = async (req, res) => {
   }
 };
 
-// =====================================================================
-// GET /api/payments/status/:reff
-// =====================================================================
 const checkStatus = async (req, res) => {
   const { reff } = req.params;
   try {
@@ -360,13 +366,10 @@ const checkStatus = async (req, res) => {
       `SELECT payment_status, booking_id FROM bus_payments WHERE payment_reff = ?`,
       [reff]
     );
-
-    // 1. Cek DB dulu (kalau callback sudah masuk, langsung SUCCESS)
     if (rows.length && PAID.includes(String(rows[0].payment_status).toUpperCase())) {
       return res.json({ status: 'SUCCESS', payment_status: 'SUCCESS' });
     }
 
-    // 2. Kalau belum, cek ke LinkQu
     const d = await fetchGatewayStatus(reff);
     console.log('[PAYMENT STATUS]', reff, JSON.stringify(d));
 
@@ -374,8 +377,6 @@ const checkStatus = async (req, res) => {
       await markPaid(reff);
       return res.json({ status: 'SUCCESS', payment_status: 'SUCCESS', data: d });
     }
-
-    // 3. LinkQu bilang masih PENDING
     res.json({ status: 'PENDING', message: 'Menunggu pembayaran', data: d });
   } catch (err) {
     console.error('[PAYMENT STATUS]', err.message);
