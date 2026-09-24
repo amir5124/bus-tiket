@@ -1,0 +1,7 @@
+node_modules/
+.env
+uploads/vehicles/*
+uploads/vendors/*
+!uploads/vehicles/.gitkeep
+!uploads/vendors/.gitkeep
+npm-debug.log*

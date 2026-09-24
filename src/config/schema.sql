@@ -1,0 +1,4 @@
+-- Salin persis dari schema yang diberikan user (bus_travel.sql).
+-- File ini hanya placeholder referensi: jalankan schema asli Anda terlebih dahulu
+-- (psql -f bus_travel.sql) sebelum menjalankan aplikasi ini.
+-- migrate.js akan mengecek apakah tabel inti sudah ada.
