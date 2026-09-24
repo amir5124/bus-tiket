@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const db = require('../config/db');          // perlu mengekspor { query, pool } (mysql2/promise)
 const { query } = db;
 const { asyncHandler, ok } = require('../utils/helpers');
+const bookingOps = require('../utils/bookingOps');
 
 const HOLD_MINUTES = 30;   // masa tahan kursi = masa berlaku pembayaran
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -133,9 +134,8 @@ const createBooking = asyncHandler(async (req, res) => {
         }
 
         // tahan kursi (anti double-booking)
-        await conn.query('CALL sp_hold_seats(?,?,?,?,@ok)', [scheduleId, seats.join(','), bookingId, HOLD_MINUTES]);
-        const [[h]] = await conn.query('SELECT @ok AS ok');
-        if (!h.ok) throw fail(409, 'Kursi sudah dipesan orang lain, silakan pilih kursi lain');
+        const okHold = await bookingOps.holdSeats(conn, scheduleId, seats, bookingId);
+        if (!okHold) throw fail(409, 'Kursi sudah dipesan orang lain, silakan pilih kursi lain');
 
         const rows = ps.map((p, i) => [
             bookingId, i + 1, String(p.name).trim(),
