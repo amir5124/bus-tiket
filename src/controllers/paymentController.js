@@ -70,7 +70,9 @@ const BANK_TO_CODE = {
 };
 
 // =====================================================================
-// JAGEL HELPERS (untuk coin)
+// JAGEL — Cek saldo (GET, bukan POST)
+// Response: { success: true, data: { balance, balance_active } }
+// Untuk pembayaran, pakai `balance_active` (saldo yang bisa dipakai)
 // =====================================================================
 async function fetchJagelSaldo(username) {
   try {
@@ -78,46 +80,104 @@ async function fetchJagelSaldo(username) {
       console.error('[JAGEL-SALDO] JAGEL_API_KEY tidak di-set');
       return null;
     }
-    const resp = await axios.post(`${JAGEL_BASE_URL}/balance/check`, {
-      type: 'username',
-      value: username,
-      apikey: JAGEL_API_KEY,
-    }, {
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+
+    const url = `${JAGEL_BASE_URL}/balance/check`;
+    console.log('[JAGEL-SALDO] GET', url, 'user=', username);
+
+    // ⚠️ GET, dengan body (axios support body di GET via `data`)
+    const resp = await axios.request({
+      method: 'GET',
+      url,
+      data: {
+        type: 'username',
+        value: username,
+        apikey: JAGEL_API_KEY,
+      },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
       timeout: 15000,
+      validateStatus: s => s < 600,
     });
+
+    console.log('[JAGEL-SALDO] HTTP', resp.status);
+    console.log('[JAGEL-SALDO] response:', JSON.stringify(resp.data));
+
     const data = resp.data || {};
+    if (data.success === false) {
+      console.error('[JAGEL-SALDO] Jagel bilang gagal:', data);
+      return null;
+    }
+
+    // Prioritas: balance_active (yang bisa dipakai), fallback ke balance
     const saldo = Number(
-      data.balance ?? data.saldo ?? data.data?.balance ?? data.data?.saldo ?? data.amount ?? NaN
+      data.data?.balance_active ??
+      data.data?.balance ??
+      data.balance_active ??
+      data.balance ??
+      NaN
     );
+
     if (!Number.isFinite(saldo)) {
       console.error('[JAGEL-SALDO] format tidak dikenali:', JSON.stringify(data));
       return null;
     }
-    return saldo;
+
+    return {
+      balance: Number(data.data?.balance ?? data.balance ?? saldo),
+      balance_active: saldo,
+    };
   } catch (e) {
-    console.error('[JAGEL-SALDO] gagal:', e.response?.data || e.message);
+    console.error('[JAGEL-SALDO] gagal:', {
+      message: e.message,
+      status: e.response?.status,
+      data: e.response?.data,
+      url: e.config?.url,
+    });
     return null;
   }
 }
 
+// =====================================================================
+// JAGEL — Adjust saldo (POST, sesuai dokumentasi)
+// amount: positif = tambah, negatif = potong
+// =====================================================================
 async function adjustJagelSaldo(username, amount, note) {
   try {
-    const resp = await axios.post(`${JAGEL_BASE_URL}/balance/adjust`, {
+    const url = `${JAGEL_BASE_URL}/balance/adjust`;
+    console.log('[JAGEL-ADJUST] POST', url, 'user=', username, 'amount=', amount);
+
+    const resp = await axios.post(url, {
       type: 'username',
       value: username,
-      amount: amount,       // negatif = potong
-      note: note,
+      amount: amount,          // negatif = potong
       apikey: JAGEL_API_KEY,
+      note: note || '',
+      // adjust_balance_admin: 0, // optional, default 0
     }, {
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
       timeout: 30000,
+      validateStatus: s => s < 600,
     });
+
+    console.log('[JAGEL-ADJUST] HTTP', resp.status);
+    console.log('[JAGEL-ADJUST] response:', JSON.stringify(resp.data));
+
     const data = resp.data || {};
-    if (data.success === false) throw new Error(data.message || 'Jagel tolak adjust saldo');
+    if (data.success === false) {
+      throw new Error(data.message || 'Jagel tolak adjust saldo');
+    }
     return data;
   } catch (e) {
-    console.error('[JAGEL-ADJUST] gagal:', e.response?.data || e.message);
+    console.error('[JAGEL-ADJUST] gagal:', {
+      message: e.message,
+      status: e.response?.status,
+      data: e.response?.data,
+    });
     throw new Error(e.response?.data?.message || e.message);
   }
 }
@@ -393,11 +453,20 @@ const checkCoinBalance = async (req, res) => {
   if (!user) return res.status(400).json({ status: 'Error', message: 'user wajib diisi' });
 
   try {
-    const saldo = await fetchJagelSaldo(user);
-    if (saldo === null) {
-      return res.status(404).json({ status: 'Error', message: 'User tidak ditemukan atau saldo tidak terbaca' });
+    const saldoObj = await fetchJagelSaldo(user);
+    if (!saldoObj) {
+      return res.status(404).json({
+        status: 'Error',
+        message: 'User tidak ditemukan atau saldo tidak terbaca',
+      });
     }
-    res.json({ status: 'Success', user, balance: saldo });
+
+    res.json({
+      status: 'Success',
+      user,
+      balance: saldoObj.balance,            // saldo total (info)
+      balance_active: saldoObj.balance_active, // saldo yang bisa dipakai
+    });
   } catch (err) {
     console.error('[COIN-BALANCE]', err.message);
     res.status(500).json({ status: 'Error', message: err.message });
