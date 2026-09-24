@@ -1,74 +1,133 @@
 const router = require('express').Router();
-const { requireAuth, requireVendorMember } = require('../middleware/auth');
+const { requireAuth, requireVendorMember, requireActiveVendor } = require('../middleware/auth');
 const { uploadVehiclePhotos } = require('../middleware/upload');
 
 const vendorCtrl = require('../controllers/vendorController');
 const vehicleCtrl = require('../controllers/vehicleController');
+const vendorRouteCtrl = require('../controllers/vendorRouteController');
+const vendorScheduleCtrl = require('../controllers/vendorScheduleController');
 
 router.use(requireAuth);
 
-/* --- Onboarding (tidak butuh sudah jadi member vendor) --- */
-// POST /api/vendors  -> daftar jadi vendor baru
+/* =====================================================================
+ * ONBOARDING — daftar jadi vendor (belum butuh membership)
+ * ===================================================================== */
 router.post('/', vendorCtrl.registerVendor);
 
-/* --- Profil & manajemen vendor (butuh membership) --- */
-// GET  /api/vendors/:vendorId
+/* =====================================================================
+ * PROFIL VENDOR
+ * ===================================================================== */
 router.get('/:vendorId', requireVendorMember('staff'), vendorCtrl.getMyVendorProfile);
-// PATCH /api/vendors/:vendorId  (min. manager)
 router.patch('/:vendorId', requireVendorMember('manager'), vendorCtrl.updateVendorProfile);
-// POST /api/vendors/:vendorId/bank-accounts (min. owner)
 router.post('/:vendorId/bank-accounts', requireVendorMember('owner'), vendorCtrl.addBankAccount);
-// POST /api/vendors/:vendorId/members (min. owner)
 router.post('/:vendorId/members', requireVendorMember('owner'), vendorCtrl.addVendorMember);
 
-/* --- Fasilitas master (read-only) --- */
-// GET /api/vendors/:vendorId/facilities
+/* =====================================================================
+ * FASILITAS MASTER
+ * ===================================================================== */
 router.get('/:vendorId/facilities', requireVendorMember('staff'), vehicleCtrl.listFacilities);
 
-/* --- Denah kursi (seat layout) --- */
-// POST /api/vendors/:vendorId/seat-layouts  (min. manager)
-router.post('/:vendorId/seat-layouts', requireVendorMember('manager'), vehicleCtrl.createSeatLayout);
-// GET  /api/vendors/:vendorId/seat-layouts
+/* =====================================================================
+ * DENAH KURSI (seat layout)
+ * ===================================================================== */
+router.post('/:vendorId/seat-layouts',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vehicleCtrl.createSeatLayout
+);
 router.get('/:vendorId/seat-layouts', requireVendorMember('staff'), vehicleCtrl.listSeatLayouts);
-// GET  /api/vendors/:vendorId/seat-layouts/:layoutId
 router.get('/:vendorId/seat-layouts/:layoutId', requireVendorMember('staff'), vehicleCtrl.getSeatLayoutDetail);
 
-/* --- Armada (vehicles) - fitur utama upload detail lengkap --- */
-// POST /api/vendors/:vendorId/vehicles  (min. manager) - multipart, field 'photos' max 10
+/* =====================================================================
+ * ARMADA (vehicles) — hanya vendor active
+ * ===================================================================== */
 router.post(
   '/:vendorId/vehicles',
   requireVendorMember('manager'),
+  requireActiveVendor(),
   uploadVehiclePhotos.array('photos', 10),
   vehicleCtrl.createVehicle
 );
-// GET  /api/vendors/:vendorId/vehicles
 router.get('/:vendorId/vehicles', requireVendorMember('staff'), vehicleCtrl.listMyVehicles);
-// GET  /api/vendors/:vendorId/vehicles/:id
 router.get('/:vendorId/vehicles/:id', requireVendorMember('staff'), vehicleCtrl.getVehicleDetail);
-// PATCH /api/vendors/:vendorId/vehicles/:id  (min. manager)
-router.patch('/:vendorId/vehicles/:id', requireVendorMember('manager'), vehicleCtrl.updateVehicle);
-// PUT  /api/vendors/:vendorId/vehicles/:id/facilities  (min. manager)
-router.put('/:vendorId/vehicles/:id/facilities', requireVendorMember('manager'), vehicleCtrl.setVehicleFacilities);
-// POST /api/vendors/:vendorId/vehicles/:id/photos  (min. manager)
+router.patch('/:vendorId/vehicles/:id',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vehicleCtrl.updateVehicle
+);
+router.put('/:vendorId/vehicles/:id/facilities',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vehicleCtrl.setVehicleFacilities
+);
 router.post(
   '/:vendorId/vehicles/:id/photos',
   requireVendorMember('manager'),
+  requireActiveVendor(),
   uploadVehiclePhotos.array('photos', 10),
   vehicleCtrl.addVehiclePhotos
 );
-// PATCH /api/vendors/:vendorId/vehicles/:id/photos/:photoId/cover  (min. manager)
-router.patch(
-  '/:vendorId/vehicles/:id/photos/:photoId/cover',
+router.patch('/:vendorId/vehicles/:id/photos/:photoId/cover',
   requireVendorMember('manager'),
+  requireActiveVendor(),
   vehicleCtrl.setCoverPhoto
 );
-// DELETE /api/vendors/:vendorId/vehicles/:id/photos/:photoId  (min. manager)
-router.delete(
-  '/:vendorId/vehicles/:id/photos/:photoId',
+router.delete('/:vendorId/vehicles/:id/photos/:photoId',
   requireVendorMember('manager'),
+  requireActiveVendor(),
   vehicleCtrl.deleteVehiclePhoto
 );
-// DELETE /api/vendors/:vendorId/vehicles/:id  (nonaktifkan, min. owner)
-router.delete('/:vendorId/vehicles/:id', requireVendorMember('owner'), vehicleCtrl.deactivateVehicle);
+router.delete('/:vendorId/vehicles/:id',
+  requireVendorMember('owner'),
+  requireActiveVendor(),
+  vehicleCtrl.deactivateVehicle
+);
+
+/* =====================================================================
+ * RUTE VENDOR — hanya vendor active untuk create/delete
+ * List boleh diakses walau belum active (biar dashboard tetap tampil)
+ * ===================================================================== */
+router.get('/:vendorId/routes',
+  requireVendorMember('staff'),
+  vendorRouteCtrl.listVendorRoutes
+);
+router.post('/:vendorId/routes',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vendorRouteCtrl.createVendorRoute
+);
+router.delete('/:vendorId/routes/:id',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vendorRouteCtrl.deleteVendorRoute
+);
+
+/* =====================================================================
+ * JADWAL VENDOR — hanya vendor active untuk create/update/delete/publish
+ * ===================================================================== */
+router.get('/:vendorId/schedules',
+  requireVendorMember('staff'),
+  vendorScheduleCtrl.listVendorSchedules
+);
+router.post('/:vendorId/schedules',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vendorScheduleCtrl.createVendorSchedule
+);
+router.put('/:vendorId/schedules/:id',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vendorScheduleCtrl.updateVendorSchedule
+);
+router.delete('/:vendorId/schedules/:id',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vendorScheduleCtrl.deleteVendorSchedule
+);
+router.post('/:vendorId/schedules/:id/publish',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vendorScheduleCtrl.publishVendorSchedule
+);
 
 module.exports = router;

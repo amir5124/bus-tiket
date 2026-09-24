@@ -253,4 +253,47 @@ async function optionalAuth(req, res, next) {
   }
 }
 
-module.exports = { requireAuth, requireVendorMember, requireAdmin, optionalAuth };
+// =====================================================================
+// requireActiveVendor — cek vendor.status === 'active'
+// Dipakai untuk endpoint upload jasa (vehicles, routes, schedules)
+// =====================================================================
+function requireActiveVendor() {
+  return async (req, res, next) => {
+    try {
+      // DEV BYPASS — langsung lolos
+      if (DEV_MODE) {
+        req.vendorStatus = 'active';
+        return next();
+      }
+
+      if (!req.vendorId) {
+        return res.status(400).json({ success: false, message: 'vendor_id tidak di-set' });
+      }
+
+      const { rows } = await query(
+        `SELECT id, status, verified_at FROM vendors WHERE id = ? LIMIT 1`,
+        [req.vendorId]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+      }
+
+      const v = rows[0];
+      if (v.status !== 'active') {
+        return res.status(403).json({
+          success: false,
+          message: `Vendor belum aktif (status: ${v.status}). Tunggu verifikasi admin.`,
+          vendor_status: v.status,
+        });
+      }
+
+      req.vendorStatus = v.status;
+      next();
+    } catch (err) {
+      console.error('[requireActiveVendor]', err.message);
+      next(err);
+    }
+  };
+}
+
+module.exports = { requireAuth, requireVendorMember, requireAdmin, optionalAuth, requireActiveVendor, };
