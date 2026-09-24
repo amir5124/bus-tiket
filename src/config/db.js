@@ -10,8 +10,15 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 20),
   queueLimit: 0,
-  timezone: '+08:00',           // ← WITA
+  timezone: '+08:00',
   dateStrings: true,
+  charset: 'utf8mb4',
+});
+
+// ====== TAMBAHKAN INI ======
+// Set session timezone tiap koneksi baru
+pool.on('connection', (conn) => {
+  conn.query("SET time_zone = '+08:00'");
 });
 
 // ============================================================
