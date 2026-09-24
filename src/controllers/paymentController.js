@@ -70,9 +70,9 @@ const BANK_TO_CODE = {
 };
 
 // =====================================================================
-// JAGEL — Cek saldo (GET, bukan POST)
+// JAGEL — Cek saldo (GET) — RETURN OBJECT { balance, balance_active }
+// Dokumentasi: GET https://api.jagel.id/v1/balance/check
 // Response: { success: true, data: { balance, balance_active } }
-// Untuk pembayaran, pakai `balance_active` (saldo yang bisa dipakai)
 // =====================================================================
 async function fetchJagelSaldo(username) {
   try {
@@ -81,33 +81,67 @@ async function fetchJagelSaldo(username) {
       return null;
     }
 
+    const url = `${JAGEL_BASE_URL}/balance/check`;
+    console.log('[JAGEL-SALDO] GET', url, 'user=', username);
+
     const resp = await axios.request({
       method: 'GET',
-      url: `${JAGEL_BASE_URL}/balance/check`,
-      data: { type: 'username', value: username, apikey: JAGEL_API_KEY },
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      url,
+      data: {
+        type: 'username',
+        value: username,
+        apikey: JAGEL_API_KEY,
+      },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
       timeout: 15000,
       validateStatus: s => s < 600,
     });
 
-    const data = resp.data || {};
-    if (data.success === false) return null;
+    console.log('[JAGEL-SALDO] HTTP', resp.status);
+    console.log('[JAGEL-SALDO] response:', JSON.stringify(resp.data));
 
-    // Return number saja — prioritas balance_active
-    const saldo = Number(
-      data.data?.balance_active ??
+    const data = resp.data || {};
+    if (data.success === false) {
+      console.error('[JAGEL-SALDO] Jagel bilang gagal:', JSON.stringify(data));
+      return null;
+    }
+
+    const balance = Number(
       data.data?.balance ??
-      data.balance_active ??
       data.balance ??
       NaN
     );
-    if (!Number.isFinite(saldo)) return null;
-    return saldo;
+    const balanceActive = Number(
+      data.data?.balance_active ??
+      data.balance_active ??
+      balance ??
+      NaN
+    );
+
+    if (!Number.isFinite(balance) && !Number.isFinite(balanceActive)) {
+      console.error('[JAGEL-SALDO] format tidak dikenali:', JSON.stringify(data));
+      return null;
+    }
+
+    // ⚠️ KUNCI: return OBJECT, bukan number
+    return {
+      balance: Number.isFinite(balance) ? balance : balanceActive,
+      balance_active: Number.isFinite(balanceActive) ? balanceActive : balance,
+    };
   } catch (e) {
-    console.error('[JAGEL-SALDO] gagal:', e.response?.data || e.message);
+    console.error('[JAGEL-SALDO] gagal:', {
+      message: e.message,
+      status: e.response?.status,
+      data: e.response?.data,
+      url: e.config?.url,
+    });
     return null;
   }
 }
+
 // =====================================================================
 // JAGEL — Adjust saldo (POST, sesuai dokumentasi)
 // amount: positif = tambah, negatif = potong
@@ -120,10 +154,9 @@ async function adjustJagelSaldo(username, amount, note) {
     const resp = await axios.post(url, {
       type: 'username',
       value: username,
-      amount: amount,          // negatif = potong
+      amount: amount,
       apikey: JAGEL_API_KEY,
       note: note || '',
-      // adjust_balance_admin: 0, // optional, default 0
     }, {
       headers: {
         'Content-Type': 'application/json',
@@ -152,7 +185,7 @@ async function adjustJagelSaldo(username, amount, note) {
 }
 
 // =====================================================================
-// KIRIM INVOICE VIA EMAIL (dipanggil setelah markPaid sukses)
+// KIRIM INVOICE VIA EMAIL
 // =====================================================================
 async function sendInvoiceEmail(bookingId) {
   try {
@@ -433,8 +466,8 @@ const checkCoinBalance = async (req, res) => {
     res.json({
       status: 'Success',
       user,
-      balance: saldoObj.balance,            // saldo total (info)
-      balance_active: saldoObj.balance_active, // saldo yang bisa dipakai
+      balance: saldoObj.balance,
+      balance_active: saldoObj.balance_active,
     });
   } catch (err) {
     console.error('[COIN-BALANCE]', err.message);
@@ -457,11 +490,13 @@ const payWithCoin = async (req, res) => {
   }
 
   try {
-    // 1. Cek saldo
-    const saldoAktif = await fetchJagelSaldo(user);
-    if (saldoAktif === null) {
+    // 1. Cek saldo (object { balance, balance_active })
+    const saldoObj = await fetchJagelSaldo(user);
+    if (!saldoObj) {
       return res.status(404).json({ status: 'Error', message: 'Gagal membaca saldo user' });
     }
+
+    const saldoAktif = saldoObj.balance_active;
     if (saldoAktif < amt) {
       return res.status(400).json({
         status: 'Error',
@@ -470,7 +505,7 @@ const payWithCoin = async (req, res) => {
       });
     }
 
-    // 2. Potong saldo
+    // 2. Potong saldo di Jagel
     const reference = 'COIN-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
     const note = description || `Pembayaran booking ${booking_code || '-'} | Ref: ${reference}`;
     await adjustJagelSaldo(user, -Math.abs(amt), note);
@@ -508,6 +543,7 @@ const payWithCoin = async (req, res) => {
     res.status(500).json({ status: 'Error', message: err.message });
   }
 };
+
 // =====================================================================
 // COIN — Konfirmasi pembayaran coin
 // POST /api/payments/coin-confirm
@@ -536,6 +572,8 @@ const coinConfirm = async (req, res) => {
 // coinConfirmInternal — update booking, invoice, notif vendor & customer
 // =====================================================================
 async function coinConfirmInternal({ user, amount, booking_code, order_no, reference }) {
+  console.log('[COIN-CONFIRM] mulai untuk booking_code=', booking_code);
+
   const { rows } = await query(
     `SELECT b.*,
             v.id AS vendor_id, v.name AS vendor_name,
@@ -553,8 +591,12 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
       WHERE b.booking_code = ? LIMIT 1`,
     [booking_code]
   );
-  if (!rows.length) throw new Error('Booking tidak ditemukan');
+  if (!rows.length) {
+    console.error('[COIN-CONFIRM] ❌ booking tidak ditemukan:', booking_code);
+    throw new Error('Booking tidak ditemukan: ' + booking_code);
+  }
   const booking = rows[0];
+  console.log('[COIN-CONFIRM] booking ditemukan, id=', booking.id, 'status=', booking.status);
 
   if (booking.status === 'paid') {
     console.log('[COIN-CONFIRM] sudah paid (skip):', booking_code);
@@ -563,6 +605,15 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
 
   if (amount && Number(amount) < Number(booking.total_amount)) {
     throw new Error('Nominal kurang dari total booking');
+  }
+
+  // Ambil method_id untuk 'coin'
+  const { rows: coinMethod } = await query(
+    `SELECT id FROM payment_methods WHERE code = 'coin' LIMIT 1`
+  );
+  const coinMethodId = coinMethod[0]?.id || null;
+  if (!coinMethodId) {
+    throw new Error('payment_methods code "coin" belum ada. Jalankan INSERT INTO payment_methods (code, name, type, icon) VALUES (\'coin\',\'Koin LinkU\',\'ewallet\',\'mdi:hand-coin\');');
   }
 
   const ref = reference || ('COIN-' + Date.now());
@@ -575,17 +626,17 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
   if (existing.length) {
     await query(
       `UPDATE payments
-          SET gateway_ref = ?, amount = ?, status = 'paid', paid_at = NOW(),
+          SET gateway_ref = ?, method_id = ?, amount = ?, status = 'paid', paid_at = NOW(),
               qr_string = NULL, va_number = NULL
         WHERE id = ?`,
-      [ref, amount || booking.total_amount, existing[0].id]
+      [ref, coinMethodId, amount || booking.total_amount, existing[0].id]
     );
   } else {
     await query(
       `INSERT INTO payments
          (booking_id, method_id, amount, status, gateway_ref, paid_at, created_at)
-       VALUES (?, NULL, ?, 'paid', ?, NOW(), NOW())`,
-      [booking.id, amount || booking.total_amount, ref]
+       VALUES (?, ?, ?, 'paid', ?, NOW(), NOW())`,
+      [booking.id, coinMethodId, amount || booking.total_amount, ref]
     );
   }
 
@@ -602,31 +653,39 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
 
   console.log(`[COIN-CONFIRM] ✅ Booking ${booking_code} paid via coin (user=${user})`);
 
-  // Invoice email ke customer
-  sendInvoiceEmail(booking.id).catch(err =>
-    console.error('[INVOICE] async error:', err.message)
-  );
+  // 1. Invoice email (await, biar tahu hasilnya)
+  try {
+    await sendInvoiceEmail(booking.id);
+    console.log('[COIN-CONFIRM] ✅ invoice terkirim untuk booking', booking.id);
+  } catch (e) {
+    console.error('[COIN-CONFIRM] ❌ invoice gagal:', e.message, e.stack);
+  }
 
-  // Notifikasi vendor (in-app + Jagel message + email)
-  notifyVendor({
-    vendor_id: booking.vendor_id,
-    vendor_name: booking.vendor_name,
-    vendor_email: booking.vendor_email,
-    vendor_phone: booking.vendor_phone,
-    type: 'payment_paid',
-    title: `Pembayaran diterima — ${booking.booking_code}`,
-    body: `Customer ${booking.contact_name} membayar ${booking.seats_count} kursi via Koin.`,
-    data: {
-      booking_code: booking.booking_code,
-      order_no: booking.order_no,
-      amount: booking.total_amount,
-      method: 'COIN',
-      user,
-      reference: ref,
-    },
-  }).catch(err => console.error('[NOTIFY-VENDOR] async error:', err.message));
+  // 2. Notifikasi vendor
+  try {
+    await notifyVendor({
+      vendor_id: booking.vendor_id,
+      vendor_name: booking.vendor_name,
+      vendor_email: booking.vendor_email,
+      vendor_phone: booking.vendor_phone,
+      type: 'payment_paid',
+      title: `Pembayaran diterima — ${booking.booking_code}`,
+      body: `Customer ${booking.contact_name} membayar ${booking.seats_count} kursi via Koin LinkU.`,
+      data: {
+        booking_code: booking.booking_code,
+        order_no: booking.order_no,
+        amount: booking.total_amount,
+        method: 'COIN',
+        user,
+        reference: ref,
+      },
+    });
+    console.log('[COIN-CONFIRM] ✅ notif vendor terkirim');
+  } catch (e) {
+    console.error('[COIN-CONFIRM] ❌ notif vendor gagal:', e.message);
+  }
 
-  // Notifikasi customer via username Jagel (kalau customer login)
+  // 3. Notifikasi customer via username Jagel (kalau customer login)
   if (booking.user_id) {
     try {
       const { rows: userRows } = await query(
@@ -640,12 +699,13 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
           `Booking: ${booking.booking_code}\n` +
           `Rute: ${booking.origin_city} → ${booking.destination_city}\n` +
           `Total: Rp ${Number(booking.total_amount).toLocaleString('id-ID')}\n` +
-          `Metode: Koin\n\n` +
+          `Metode: Koin LinkU\n\n` +
           `E-tiket dikirim ke email ${booking.contact_email}. Terima kasih!`
         );
+        console.log('[COIN-CONFIRM] ✅ notif customer terkirim');
       }
     } catch (e) {
-      console.error('[NOTIFY-CUSTOMER] gagal:', e.message);
+      console.error('[COIN-CONFIRM] ❌ notif customer gagal:', e.message);
     }
   }
 
@@ -710,9 +770,12 @@ const markPaid = async (partner_reff) => {
   console.log('[markPaid] ✅ booking', p.booking_id, 'jadi paid');
 
   // Invoice email
-  sendInvoiceEmail(p.booking_id).catch(err =>
-    console.error('[INVOICE] async error:', err.message)
-  );
+  try {
+    await sendInvoiceEmail(p.booking_id);
+    console.log('[markPaid] ✅ invoice terkirim untuk booking', p.booking_id);
+  } catch (e) {
+    console.error('[markPaid] ❌ invoice gagal:', e.message);
+  }
 
   // Notif vendor
   try {
