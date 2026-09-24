@@ -68,8 +68,20 @@ async function loadBooking(code) {
         `SELECT passenger_no, full_name, seat_number, ticket_code, insurance_selected, checked_in_at
        FROM booking_passengers WHERE booking_id = ? ORDER BY passenger_no`, [b.id]);
     const pay = await query(
-        `SELECT payment_reff, payment_method, va_number, qris_url, amount, payment_status, expired_date, payment_date
-       FROM bus_payments WHERE booking_id = ? ORDER BY id DESC`, [b.id]);
+        `SELECT p.id,
+                p.amount,
+                p.status          AS payment_status,
+                p.va_number,
+                p.qr_string,
+                p.gateway_ref     AS payment_reff,
+                p.expires_at      AS expired_date,
+                p.paid_at         AS payment_date,
+                pm.code           AS payment_method_code,
+                pm.name           AS payment_method
+           FROM payments p
+           LEFT JOIN payment_methods pm ON pm.id = p.method_id
+          WHERE p.booking_id = ?
+          ORDER BY p.id DESC`, [b.id]);
     b.passengers = p.rows;
     b.payments = pay.rows;
     b.refundable = !!b.refundable;
