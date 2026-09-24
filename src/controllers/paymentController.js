@@ -81,36 +81,19 @@ async function fetchJagelSaldo(username) {
       return null;
     }
 
-    const url = `${JAGEL_BASE_URL}/balance/check`;
-    console.log('[JAGEL-SALDO] GET', url, 'user=', username);
-
-    // ⚠️ GET, dengan body (axios support body di GET via `data`)
     const resp = await axios.request({
       method: 'GET',
-      url,
-      data: {
-        type: 'username',
-        value: username,
-        apikey: JAGEL_API_KEY,
-      },
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
+      url: `${JAGEL_BASE_URL}/balance/check`,
+      data: { type: 'username', value: username, apikey: JAGEL_API_KEY },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       timeout: 15000,
       validateStatus: s => s < 600,
     });
 
-    console.log('[JAGEL-SALDO] HTTP', resp.status);
-    console.log('[JAGEL-SALDO] response:', JSON.stringify(resp.data));
-
     const data = resp.data || {};
-    if (data.success === false) {
-      console.error('[JAGEL-SALDO] Jagel bilang gagal:', data);
-      return null;
-    }
+    if (data.success === false) return null;
 
-    // Prioritas: balance_active (yang bisa dipakai), fallback ke balance
+    // Return number saja — prioritas balance_active
     const saldo = Number(
       data.data?.balance_active ??
       data.data?.balance ??
@@ -118,27 +101,13 @@ async function fetchJagelSaldo(username) {
       data.balance ??
       NaN
     );
-
-    if (!Number.isFinite(saldo)) {
-      console.error('[JAGEL-SALDO] format tidak dikenali:', JSON.stringify(data));
-      return null;
-    }
-
-    return {
-      balance: Number(data.data?.balance ?? data.balance ?? saldo),
-      balance_active: saldo,
-    };
+    if (!Number.isFinite(saldo)) return null;
+    return saldo;
   } catch (e) {
-    console.error('[JAGEL-SALDO] gagal:', {
-      message: e.message,
-      status: e.response?.status,
-      data: e.response?.data,
-      url: e.config?.url,
-    });
+    console.error('[JAGEL-SALDO] gagal:', e.response?.data || e.message);
     return null;
   }
 }
-
 // =====================================================================
 // JAGEL — Adjust saldo (POST, sesuai dokumentasi)
 // amount: positif = tambah, negatif = potong
@@ -479,7 +448,6 @@ const checkCoinBalance = async (req, res) => {
 // =====================================================================
 const payWithCoin = async (req, res) => {
   const { user, amount, booking_code, order_no, description } = req.body || {};
-
   if (!user || !amount) {
     return res.status(400).json({ status: 'Error', message: 'user dan amount wajib' });
   }
@@ -490,35 +458,39 @@ const payWithCoin = async (req, res) => {
 
   try {
     // 1. Cek saldo
-    const saldo = await fetchJagelSaldo(user);
-    if (saldo === null) {
+    const saldoAktif = await fetchJagelSaldo(user);
+    if (saldoAktif === null) {
       return res.status(404).json({ status: 'Error', message: 'Gagal membaca saldo user' });
     }
-    if (saldo < amt) {
+    if (saldoAktif < amt) {
       return res.status(400).json({
         status: 'Error',
-        message: `Saldo tidak cukup. Saldo: ${saldo}, butuh: ${amt}`,
-        balance: saldo,
+        message: `Saldo tidak cukup. Saldo aktif: ${saldoAktif}, butuh: ${amt}`,
+        balance_active: saldoAktif,
       });
     }
 
-    // 2. Potong saldo di Jagel
+    // 2. Potong saldo
     const reference = 'COIN-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
     const note = description || `Pembayaran booking ${booking_code || '-'} | Ref: ${reference}`;
-
     await adjustJagelSaldo(user, -Math.abs(amt), note);
-    const newBalance = saldo - amt;
 
-    console.log(`[COIN-PAY] ${user} dipotong ${amt}: ${saldo} → ${newBalance}`);
+    const newBalance = saldoAktif - amt;
+    console.log(`[COIN-PAY] ${user} dipotong ${amt}: ${saldoAktif} → ${newBalance}`);
 
-    // 3. Kalau ada booking_code → tandai booking paid
+    // 3. Update booking
     if (booking_code) {
       try {
-        await coinConfirmInternal({
-          user, amount: amt, booking_code, order_no, reference,
-        });
+        await coinConfirmInternal({ user, amount: amt, booking_code, order_no, reference });
       } catch (e) {
-        console.error('[COIN-PAY] coinConfirm internal gagal:', e.message);
+        console.error('[COIN-PAY] ❌ coinConfirm internal gagal:', e.message, e.stack);
+        return res.status(500).json({
+          status: 'Error',
+          message: 'Saldo sudah dipotong, tapi gagal update booking: ' + e.message,
+          reference,
+          balance_after: newBalance,
+          booking_code,
+        });
       }
     }
 
@@ -526,17 +498,16 @@ const payWithCoin = async (req, res) => {
       status: 'Success',
       user,
       amount: amt,
-      balance_before: saldo,
+      balance_before: saldoAktif,
       balance_after: newBalance,
       reference,
       booking_code: booking_code || null,
     });
   } catch (err) {
-    console.error('[COIN-PAY]', err.message);
+    console.error('[COIN-PAY] error:', err.message, err.stack);
     res.status(500).json({ status: 'Error', message: err.message });
   }
 };
-
 // =====================================================================
 // COIN — Konfirmasi pembayaran coin
 // POST /api/payments/coin-confirm
