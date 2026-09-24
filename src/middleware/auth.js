@@ -2,59 +2,101 @@ const jwt = require('jsonwebtoken');
 const { query } = require('../config/db');
 
 // =====================================================================
-// DEFAULT USER — dipakai kalau request tidak membawa token
-// Cocok untuk development / internal
+// Baca data user Jagel dari header (dikirim frontend)
+// Header:
+//   x-user-id       → jagel_user_id (wajib)
+//   x-username      → username (wajib)
+//   x-fullname      → full_name (wajib)
+//   x-phone         → phone (opsional)
+//   x-email         → email (opsional)
 // =====================================================================
-const DEFAULT_USER_JAGEL_ID = process.env.DEFAULT_USER_JAGEL_ID || '123456';
+function getUserFromHeaders(req) {
+  const user_id = req.headers['x-user-id'];
+  const username = req.headers['x-username'];
+  const fullname = req.headers['x-fullname'];
+
+  if (!user_id || !username || !fullname) return null;
+
+  return {
+    jagel_user_id: String(user_id).trim(),
+    username: String(username).trim(),
+    full_name: String(fullname).trim(),
+    phone: (req.headers['x-phone'] || '').trim() || null,
+    email: (req.headers['x-email'] || '').trim() || null,
+  };
+}
 
 /**
- * Ambil user default dari DB (by jagel_user_id).
+ * Upsert user ke app_users, return row lengkap.
  */
-async function getDefaultUser() {
+async function upsertUser(userData) {
+  await query(
+    `INSERT INTO app_users (jagel_user_id, username, full_name, phone, email, is_active)
+     VALUES (?, ?, ?, ?, ?, 1)
+     ON DUPLICATE KEY UPDATE
+       username = VALUES(username),
+       full_name = VALUES(full_name),
+       phone = VALUES(phone),
+       email = VALUES(email),
+       is_active = 1,
+       last_synced_at = NOW()`,
+    [
+      userData.jagel_user_id,
+      userData.username,
+      userData.full_name,
+      userData.phone,
+      userData.email,
+    ]
+  );
+
   const { rows } = await query(
     `SELECT id, jagel_user_id, username, full_name, phone, email, is_active
        FROM app_users
       WHERE jagel_user_id = ?
       LIMIT 1`,
-    [DEFAULT_USER_JAGEL_ID]
+    [userData.jagel_user_id]
   );
   return rows[0] || null;
 }
 
 // =====================================================================
-// requireAuth — isi req.user (dari token, atau fallback default user)
+// requireAuth — WAJIB ada header user dari frontend
 // =====================================================================
 async function requireAuth(req, res, next) {
   try {
-    // 1. Coba token
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    const userData = getUserFromHeaders(req);
 
-    if (token) {
-      try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET);
-        const { rows } = await query(
-          `SELECT id, jagel_user_id, username, full_name, phone, email, is_active
-             FROM app_users WHERE id = ? LIMIT 1`,
-          [payload.userId]
-        );
-        if (rows.length && rows[0].is_active) {
-          req.user = rows[0];
-          return next();
-        }
-      } catch (err) {
-        console.warn('[requireAuth] token invalid, fallback ke default user:', err.message);
+    // Kalau tidak ada header, cek token (fallback)
+    if (!userData) {
+      const header = req.headers.authorization || '';
+      const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+      if (!token) {
+        return res.status(401).json({
+          success: false,
+          message: 'Header user (X-User-Id, X-Username, X-FullName) wajib dikirim',
+        });
       }
+
+      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      const { rows } = await query(
+        `SELECT id, jagel_user_id, username, full_name, phone, email, is_active
+           FROM app_users WHERE id = ? LIMIT 1`,
+        [payload.userId]
+      );
+      if (!rows.length || !rows[0].is_active) {
+        return res.status(401).json({ success: false, message: 'Akun tidak valid' });
+      }
+      req.user = rows[0];
+      return next();
     }
 
-    // 2. Fallback ke default user
-    const user = await getDefaultUser();
+    // Upsert dari header
+    const user = await upsertUser(userData);
     if (!user) {
-      return res.status(500).json({
-        success: false,
-        message: `Default user (jagel_user_id=${DEFAULT_USER_JAGEL_ID}) tidak ada di DB. Insert: INSERT INTO app_users (jagel_user_id, username, full_name) VALUES ('${DEFAULT_USER_JAGEL_ID}', 'amir', 'Amir Munadir');`
-      });
+      return res.status(500).json({ success: false, message: 'Gagal upsert user' });
     }
+
     req.user = user;
     next();
   } catch (err) {
@@ -64,50 +106,30 @@ async function requireAuth(req, res, next) {
 }
 
 // =====================================================================
-// requireVendorMember — set req.vendorId dari param, cek membership
+// requireVendorMember
 // =====================================================================
 const ROLE_RANK = { owner: 3, manager: 2, staff: 1 };
 
 function requireVendorMember(minRole = 'staff') {
   return async (req, res, next) => {
     try {
-      const vendorId = Number(req.params.vendorId || req.body.vendor_id || 1);
+      const vendorId = Number(req.params.vendorId || req.body.vendor_id);
       if (!vendorId) {
-        return res.status(400).json({ success: false, message: 'vendor_id wajib diisi' });
+        return res.status(400).json({ success: false, message: 'vendor_id wajib' });
       }
 
-      // Pastikan req.user ada
-      if (!req.user) {
-        const user = await getDefaultUser();
-        if (user) req.user = user;
-      }
-      if (!req.user) {
-        return res.status(401).json({ success: false, message: 'User tidak teridentifikasi' });
-      }
-
-      // Cek membership (kalau ada)
       const { rows } = await query(
         `SELECT role FROM vendor_members WHERE vendor_id = ? AND user_id = ? LIMIT 1`,
         [vendorId, req.user.id]
       );
-
-      if (rows.length) {
-        // Membership ada
-        if (ROLE_RANK[rows[0].role] < ROLE_RANK[minRole]) {
-          return res.status(403).json({ success: false, message: `Membutuhkan role minimal ${minRole}` });
-        }
-        req.vendorRole = rows[0].role;
-      } else {
-        // Tidak ada membership → auto-insert owner (untuk development)
-        await query(
-          `INSERT INTO vendor_members (vendor_id, user_id, role, notify_channels, notify_enabled)
-           VALUES (?, ?, 'owner', 'in_app,push,email,whatsapp', 1)
-           ON DUPLICATE KEY UPDATE role = 'owner'`,
-          [vendorId, req.user.id]
-        );
-        req.vendorRole = 'owner';
+      if (!rows.length) {
+        return res.status(403).json({ success: false, message: 'Anda bukan anggota vendor ini' });
+      }
+      if (ROLE_RANK[rows[0].role] < ROLE_RANK[minRole]) {
+        return res.status(403).json({ success: false, message: `Butuh role minimal ${minRole}` });
       }
 
+      req.vendorRole = rows[0].role;
       req.vendorId = vendorId;
       next();
     } catch (err) {
@@ -118,36 +140,28 @@ function requireVendorMember(minRole = 'staff') {
 }
 
 // =====================================================================
-// requireActiveVendor — cek vendor.status === 'active'
+// requireActiveVendor
 // =====================================================================
 function requireActiveVendor() {
   return async (req, res, next) => {
     try {
-      if (!req.vendorId) {
-        return res.status(400).json({ success: false, message: 'vendor_id tidak di-set' });
-      }
-
       const { rows } = await query(
-        `SELECT id, status, verified_at FROM vendors WHERE id = ? LIMIT 1`,
+        `SELECT id, status FROM vendors WHERE id = ? LIMIT 1`,
         [req.vendorId]
       );
       if (!rows.length) {
         return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
       }
-
-      const v = rows[0];
-      if (v.status !== 'active') {
+      if (rows[0].status !== 'active') {
         return res.status(403).json({
           success: false,
-          message: `Vendor belum aktif (status: ${v.status}). Tunggu verifikasi admin.`,
-          vendor_status: v.status,
+          message: `Vendor belum aktif (status: ${rows[0].status})`,
+          vendor_status: rows[0].status,
         });
       }
-
-      req.vendorStatus = v.status;
+      req.vendorStatus = rows[0].status;
       next();
     } catch (err) {
-      console.error('[requireActiveVendor]', err.message);
       next(err);
     }
   };
@@ -161,23 +175,15 @@ const ADMIN_RANK = { viewer: 1, support: 2, finance: 3, super_admin: 4 };
 function requireAdmin(minRole = 'viewer') {
   return async (req, res, next) => {
     try {
-      if (!req.user) {
-        const user = await getDefaultUser();
-        if (user) req.user = user;
-      }
-
       const { rows } = await query(
         `SELECT id, role, is_active FROM admin_users WHERE user_id = ? LIMIT 1`,
-        [req.user?.id]
+        [req.user.id]
       );
       if (!rows.length || !rows[0].is_active) {
-        // Fallback: anggap super_admin (untuk dev)
-        req.adminRole = 'super_admin';
-        req.adminUserRowId = 1;
-        return next();
+        return res.status(403).json({ success: false, message: 'Akses admin ditolak' });
       }
       if (ADMIN_RANK[rows[0].role] < ADMIN_RANK[minRole]) {
-        return res.status(403).json({ success: false, message: `Membutuhkan role admin minimal ${minRole}` });
+        return res.status(403).json({ success: false, message: `Butuh role admin minimal ${minRole}` });
       }
       req.adminRole = rows[0].role;
       req.adminUserRowId = rows[0].id;
@@ -189,13 +195,19 @@ function requireAdmin(minRole = 'viewer') {
 }
 
 // =====================================================================
-// optionalAuth — isi req.user kalau ada token, atau fallback default
+// optionalAuth
 // =====================================================================
 async function optionalAuth(req, res, next) {
   try {
+    const userData = getUserFromHeaders(req);
+    if (userData) {
+      const user = await upsertUser(userData);
+      if (user) req.user = user;
+      return next();
+    }
+
     const header = req.headers.authorization || '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-
     if (token) {
       try {
         const payload = jwt.verify(token, process.env.JWT_SECRET);
@@ -204,67 +216,12 @@ async function optionalAuth(req, res, next) {
              FROM app_users WHERE id = ? AND is_active = 1 LIMIT 1`,
           [payload.userId]
         );
-        if (rows.length) {
-          req.user = rows[0];
-          return next();
-        }
-      } catch (err) {
-        // token invalid → fallback
-      }
+        if (rows.length) req.user = rows[0];
+      } catch { /* ignore */ }
     }
-
-    // Fallback default user
-    const user = await getDefaultUser();
-    if (user) req.user = user;
-
     next();
   } catch {
     next();
-  }
-}
-
-// =====================================================================
-// Login helper — untuk endpoint /api/auth/jagel
-// =====================================================================
-async function loginWithJagel(req, res) {
-  try {
-    const { jagel_user_id, username, full_name, phone, email } = req.body || {};
-    if (!jagel_user_id || !username || !full_name) {
-      return res.status(400).json({
-        success: false,
-        message: 'jagel_user_id, username, full_name wajib diisi'
-      });
-    }
-
-    await query(
-      `INSERT INTO app_users (jagel_user_id, username, full_name, phone, email, is_active)
-       VALUES (?, ?, ?, ?, ?, 1)
-       ON DUPLICATE KEY UPDATE
-         username = VALUES(username),
-         full_name = VALUES(full_name),
-         phone = VALUES(phone),
-         email = VALUES(email),
-         is_active = 1`,
-      [jagel_user_id, username, full_name, phone || null, email || null]
-    );
-
-    const { rows } = await query(
-      `SELECT id, jagel_user_id, username, full_name, phone, email
-         FROM app_users WHERE jagel_user_id = ? LIMIT 1`,
-      [jagel_user_id]
-    );
-    const user = rows[0];
-
-    const token = jwt.sign(
-      { userId: user.id },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-    );
-
-    res.json({ success: true, data: { token, user } });
-  } catch (err) {
-    console.error('[loginWithJagel]', err.message);
-    res.status(500).json({ success: false, message: err.message });
   }
 }
 
@@ -274,6 +231,4 @@ module.exports = {
   requireActiveVendor,
   requireAdmin,
   optionalAuth,
-  loginWithJagel,
-  getDefaultUser,
 };
