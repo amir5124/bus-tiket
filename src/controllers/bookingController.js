@@ -4,6 +4,7 @@ const db = require('../config/db');          // perlu mengekspor { query, pool }
 const { query } = db;
 const { asyncHandler, ok } = require('../utils/helpers');
 
+const HOLD_MINUTES = 30;   // masa tahan kursi = masa berlaku pembayaran
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const bad = (res, status, message) => res.status(status).json({ success: false, message });
 
@@ -122,8 +123,8 @@ const createBooking = asyncHandler(async (req, res) => {
                     `INSERT INTO bookings (booking_code, order_no, user_id, buyer_username, schedule_id, vendor_id,
              contact_title, contact_name, contact_phone, contact_email, seats_count,
              ticket_subtotal, insurance_total, discount_total, has_insurance, insurance_product_id,
-             terms_accepted, terms_accepted_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NOW())`,
+             terms_accepted, terms_accepted_at, status, expires_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NOW(),'pending_payment',NOW() + INTERVAL ${HOLD_MINUTES} MINUTE)`,
                     [code, order, req.user?.id || null, req.user?.username || null, scheduleId, s.vendor_id,
                         c.title, c.name.trim(), String(c.phone).replace(/[\s-]/g, ''), c.email.trim(), n,
                         orig * n, insTotal, (orig - unit) * n, wantIns ? 1 : 0, wantIns ? s.insurance_product_id : null]);
@@ -131,8 +132,8 @@ const createBooking = asyncHandler(async (req, res) => {
             } catch (e) { if (e.code !== 'ER_DUP_ENTRY' || i === 2) throw e; }
         }
 
-        // tahan kursi (anti double-booking, 30 menit)
-        await conn.query('CALL sp_hold_seats(?,?,?,?,@ok)', [scheduleId, seats.join(','), bookingId, 30]);
+        // tahan kursi (anti double-booking)
+        await conn.query('CALL sp_hold_seats(?,?,?,?,@ok)', [scheduleId, seats.join(','), bookingId, HOLD_MINUTES]);
         const [[h]] = await conn.query('SELECT @ok AS ok');
         if (!h.ok) throw fail(409, 'Kursi sudah dipesan orang lain, silakan pilih kursi lain');
 
