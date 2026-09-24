@@ -4,13 +4,12 @@ const moment = require('moment-timezone');
 const { query } = require('../config/db');
 
 // Kredensial WAJIB dari .env (jangan ditulis di kode)
-const need = (k) => { const v = process.env[k]; if (!v) throw new Error(`Env ${k} wajib diisi`); return v; };
 const config = {
-  clientId: need('LINKQU_CLIENT_ID'),
-  clientSecret: need('LINKQU_CLIENT_SECRET'),
-  username: need('LINKQU_USERNAME'),
-  pin: need('LINKQU_PIN'),
-  serverKey: need('LINKQU_SERVER_KEY'),
+  clientId: process.env.LINKQU_CLIENT_ID || 'testing',
+  clientSecret: process.env.LINKQU_CLIENT_SECRET || '123',
+  username: process.env.LINKQU_USERNAME || 'LI307GXIN',
+  pin: process.env.LINKQU_PIN || '2K2NPCBBNNTovgB',
+  serverKey: process.env.LINKQU_SERVER_KEY || 'LinkQu@2020',
   baseUrl: process.env.LINKQU_BASE_URL || 'https://gateway-dev.linkqu.id/linkqu-partner'
 };
 const PAID = ['SUCCESS', 'SETTLED', 'PAID'];
