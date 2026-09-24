@@ -6,7 +6,7 @@ require('dotenv').config();
 
 const app = require('./app');
 const { pool, testConnection } = require('./config/db');
-const bookingOps = require('./src/utils/bookingOps');
+const bookingOps = require('./utils/bookingOps');
 
 const PORT = process.env.PORT || 4000;
 
