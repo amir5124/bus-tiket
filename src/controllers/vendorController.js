@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { query, withTransaction } = require('../config/db');
 const { asyncHandler, ok, created, randomCode } = require('../utils/helpers');
 const { notifyVendor } = require('../utils/notifyVendor');
+const { adjustJagelSaldo } = require('./paymentController');
 
 /* =====================================================================
  * LINKQU — untuk topup vendor
@@ -19,6 +20,8 @@ const linkqu = {
 
 const TOPUP_AMOUNT = 50000;
 const TOPUP_DAYS = 30;
+// Akun Jagel milik LinkU (platform), tempat penampungan dana topup vendor
+const LINKU_JAGEL_USERNAME = process.env.LINKU_JAGEL_USERNAME || 'amir';
 
 function cleanValue(s) {
   return String(s).replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
@@ -123,6 +126,7 @@ const registerVendor = asyncHandler(async (req, res) => {
 
   created(res, result);
 });
+
 /* =====================================================================
  * GET MY VENDOR PROFILE
  * ===================================================================== */
@@ -452,6 +456,19 @@ const topupCallback = asyncHandler(async (req, res) => {
 
   console.log(`[TOPUP-CALLBACK] ✅ Vendor ${topup.vendor_id} aktif s/d ${topup.period_end}`);
 
+  // ===== ADJUST SALDO JAGEL — masuk ke akun penampungan LinkU (amir) =====
+  try {
+    await adjustJagelSaldo(
+      LINKU_JAGEL_USERNAME,
+      Number(topup.amount),
+      `Topup langganan vendor "${topup.vendor_name}" (vendor_id=${topup.vendor_id}) — ${partner_reff}`
+    );
+    console.log(`[TOPUP-CALLBACK] ✅ Rp ${topup.amount} masuk Jagel @${LINKU_JAGEL_USERNAME}`);
+  } catch (e) {
+    console.error(`[TOPUP-CALLBACK] ❌ gagal kredit Jagel @${LINKU_JAGEL_USERNAME}:`, e.message);
+    // status topup tetap 'paid'; kalau gagal kredit saldo, perlu rekonsiliasi manual
+  }
+
   try {
     await notifyVendor({
       vendor_id: topup.vendor_id,
@@ -476,6 +493,7 @@ const topupCallback = asyncHandler(async (req, res) => {
 
   res.json({ message: 'OK' });
 });
+
 /**
  * GET /api/vendors/:vendorId/topup/history
  */
@@ -491,6 +509,10 @@ const listTopups = asyncHandler(async (req, res) => {
   ok(res, rows);
 });
 
+/**
+ * POST /api/vendors/:vendorId/topup/:topupId/confirm
+ * Manual confirm (dev/test)
+ */
 const confirmTopupManual = asyncHandler(async (req, res) => {
   const topupId = Number(req.params.topupId);
   const vendorId = Number(req.vendorId);
@@ -518,6 +540,18 @@ const confirmTopupManual = asyncHandler(async (req, res) => {
       [topup.period_end, vendorId]
     );
   });
+
+  // ===== ADJUST SALDO JAGEL — masuk ke akun penampungan LinkU (amir) =====
+  try {
+    await adjustJagelSaldo(
+      LINKU_JAGEL_USERNAME,
+      Number(topup.amount),
+      `Topup langganan (manual confirm) vendor "${topup.vendor_name}" (vendor_id=${vendorId}) — topup_id=${topupId}`
+    );
+    console.log(`[TOPUP-CONFIRM-MANUAL] ✅ Rp ${topup.amount} masuk Jagel @${LINKU_JAGEL_USERNAME}`);
+  } catch (e) {
+    console.error(`[TOPUP-CONFIRM-MANUAL] ❌ gagal kredit Jagel @${LINKU_JAGEL_USERNAME}:`, e.message);
+  }
 
   try {
     await notifyVendor({
@@ -583,5 +617,5 @@ module.exports = {
   topupCallback,
   listTopups,
   confirmTopupManual,
-  listStops
+  listStops,
 };
