@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { query, withTransaction } = require('../config/db');
 const { asyncHandler, ok, created, randomCode } = require('../utils/helpers');
 const { notifyVendor } = require('../utils/notifyVendor');
-const { adjustJagelSaldo } = require('./paymentController');
+const { adjustJagelSaldo } = require('../utils/jagel');
 
 /* =====================================================================
  * LINKQU — untuk topup vendor

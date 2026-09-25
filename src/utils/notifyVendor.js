@@ -2,6 +2,7 @@
 const axios = require('axios');
 const { query } = require('../config/db');
 const { sendMail } = require('./mailer');
+const { fetchJagelSaldo, adjustJagelSaldo } = require('./jagel');
 
 // Konfigurasi Jagel
 const JAGEL_BASE_URL = process.env.JAGEL_BASE_URL || 'https://api.jagel.id/v1';
@@ -212,4 +213,7 @@ function vendorNotifyEmail({ vendor_name, title, body, detailLines }) {
 </body></html>`;
 }
 
-module.exports = { notifyVendor, notifyCustomerByUsername, sendJagelMessageByUsername };
+module.exports = {
+    notifyVendor, notifyCustomerByUsername, sendJagelMessageByUsername, fetchJagelSaldo,
+    adjustJagelSaldo,
+};

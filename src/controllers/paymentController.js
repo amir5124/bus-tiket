@@ -6,6 +6,7 @@ const { query } = require('../config/db');
 const { sendMail } = require('../utils/mailer');
 const { invoiceEmail } = require('../utils/invoiceTemplate');
 const { notifyVendor, notifyCustomerByUsername } = require('../utils/notifyVendor');
+const { fetchJagelSaldo, adjustJagelSaldo } = require('../utils/jagel');
 
 // =====================================================================
 // Kredensial LinkQu
@@ -993,4 +994,5 @@ module.exports = {
   checkCoinBalance,
   payWithCoin,
   getVendorNotifications,
+  adjustJagelSaldo,
 };
