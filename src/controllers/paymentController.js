@@ -6,6 +6,8 @@ const { query } = require('../config/db');
 const { sendMail } = require('../utils/mailer');
 const { invoiceEmail } = require('../utils/invoiceTemplate');
 const { notifyVendor, notifyCustomerByUsername } = require('../utils/notifyVendor');
+
+// ✅ Cukup require dari utils/jagel — JANGAN deklarasi ulang fungsinya
 const { fetchJagelSaldo, adjustJagelSaldo } = require('../utils/jagel');
 
 // =====================================================================
@@ -22,13 +24,7 @@ const config = {
 
 const PAID = ['SUCCESS', 'SETTLED', 'PAID'];
 
-// =====================================================================
-// Jagel config (untuk coin)
-// =====================================================================
-const JAGEL_BASE_URL = process.env.JAGEL_BASE_URL || 'https://api.jagel.id/v1';
-const JAGEL_API_KEY = process.env.JAGEL_API_KEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO';
 const LINKU_JAGEL_USERNAME = process.env.LINKU_JAGEL_USERNAME || 'amir';
-
 
 // =====================================================================
 // SIGNATURE — contek dari backend topup yang WORK
@@ -72,120 +68,8 @@ const BANK_TO_CODE = {
   '028': 'ocbc_va', '016': 'maybank_va', '019': 'panin_va',
 };
 
-// =====================================================================
-// JAGEL — Cek saldo (GET) — RETURN OBJECT { balance, balance_active }
-// Dokumentasi: GET https://api.jagel.id/v1/balance/check
-// Response: { success: true, data: { balance, balance_active } }
-// =====================================================================
-async function fetchJagelSaldo(username) {
-  try {
-    if (!JAGEL_API_KEY) {
-      console.error('[JAGEL-SALDO] JAGEL_API_KEY tidak di-set');
-      return null;
-    }
-
-    const url = `${JAGEL_BASE_URL}/balance/check`;
-    console.log('[JAGEL-SALDO] GET', url, 'user=', username);
-
-    const resp = await axios.request({
-      method: 'GET',
-      url,
-      data: {
-        type: 'username',
-        value: username,
-        apikey: JAGEL_API_KEY,
-      },
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      timeout: 15000,
-      validateStatus: s => s < 600,
-    });
-
-    console.log('[JAGEL-SALDO] HTTP', resp.status);
-    console.log('[JAGEL-SALDO] response:', JSON.stringify(resp.data));
-
-    const data = resp.data || {};
-    if (data.success === false) {
-      console.error('[JAGEL-SALDO] Jagel bilang gagal:', JSON.stringify(data));
-      return null;
-    }
-
-    const balance = Number(
-      data.data?.balance ??
-      data.balance ??
-      NaN
-    );
-    const balanceActive = Number(
-      data.data?.balance_active ??
-      data.balance_active ??
-      balance ??
-      NaN
-    );
-
-    if (!Number.isFinite(balance) && !Number.isFinite(balanceActive)) {
-      console.error('[JAGEL-SALDO] format tidak dikenali:', JSON.stringify(data));
-      return null;
-    }
-
-    // ⚠️ KUNCI: return OBJECT, bukan number
-    return {
-      balance: Number.isFinite(balance) ? balance : balanceActive,
-      balance_active: Number.isFinite(balanceActive) ? balanceActive : balance,
-    };
-  } catch (e) {
-    console.error('[JAGEL-SALDO] gagal:', {
-      message: e.message,
-      status: e.response?.status,
-      data: e.response?.data,
-      url: e.config?.url,
-    });
-    return null;
-  }
-}
-
-// =====================================================================
-// JAGEL — Adjust saldo (POST, sesuai dokumentasi)
-// amount: positif = tambah, negatif = potong
-// =====================================================================
-async function adjustJagelSaldo(username, amount, note) {
-  try {
-    const url = `${JAGEL_BASE_URL}/balance/adjust`;
-    console.log('[JAGEL-ADJUST] POST', url, 'user=', username, 'amount=', amount);
-
-    const resp = await axios.post(url, {
-      type: 'username',
-      value: username,
-      amount: amount,
-      apikey: JAGEL_API_KEY,
-      note: note || '',
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      timeout: 30000,
-      validateStatus: s => s < 600,
-    });
-
-    console.log('[JAGEL-ADJUST] HTTP', resp.status);
-    console.log('[JAGEL-ADJUST] response:', JSON.stringify(resp.data));
-
-    const data = resp.data || {};
-    if (data.success === false) {
-      throw new Error(data.message || 'Jagel tolak adjust saldo');
-    }
-    return data;
-  } catch (e) {
-    console.error('[JAGEL-ADJUST] gagal:', {
-      message: e.message,
-      status: e.response?.status,
-      data: e.response?.data,
-    });
-    throw new Error(e.response?.data?.message || e.message);
-  }
-}
+// ❌ SUDAH TIDAK ADA fetchJagelSaldo & adjustJagelSaldo DI SINI
+// (sudah diimpor dari ../utils/jagel di atas)
 
 // =====================================================================
 // KIRIM INVOICE VIA EMAIL
@@ -493,7 +377,6 @@ const payWithCoin = async (req, res) => {
   }
 
   try {
-    // 1. Cek saldo (object { balance, balance_active })
     const saldoObj = await fetchJagelSaldo(user);
     if (!saldoObj) {
       return res.status(404).json({ status: 'Error', message: 'Gagal membaca saldo user' });
@@ -508,7 +391,6 @@ const payWithCoin = async (req, res) => {
       });
     }
 
-    // 2. Potong saldo di Jagel
     const reference = 'COIN-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
     const note = description || `Pembayaran booking ${booking_code || '-'} | Ref: ${reference}`;
     await adjustJagelSaldo(user, -Math.abs(amt), note);
@@ -516,7 +398,6 @@ const payWithCoin = async (req, res) => {
     const newBalance = saldoAktif - amt;
     console.log(`[COIN-PAY] ${user} dipotong ${amt}: ${saldoAktif} → ${newBalance}`);
 
-    // 3. Update booking
     if (booking_code) {
       try {
         await coinConfirmInternal({ user, amount: amt, booking_code, order_no, reference });
@@ -599,7 +480,6 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
     throw new Error('Booking tidak ditemukan: ' + booking_code);
   }
   const booking = rows[0];
-  console.log('[COIN-CONFIRM] booking ditemukan, id=', booking.id, 'status=', booking.status);
 
   if (booking.status === 'paid') {
     console.log('[COIN-CONFIRM] sudah paid (skip):', booking_code);
@@ -610,7 +490,6 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
     throw new Error('Nominal kurang dari total booking');
   }
 
-  // Ambil method_id untuk 'coin'
   const { rows: coinMethod } = await query(
     `SELECT id FROM payment_methods WHERE code = 'coin' LIMIT 1`
   );
@@ -621,7 +500,6 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
 
   const ref = reference || ('COIN-' + Date.now());
 
-  // Simpan/update payment
   const { rows: existing } = await query(
     `SELECT id FROM payments WHERE booking_id = ? AND status = 'pending' LIMIT 1`,
     [booking.id]
@@ -643,7 +521,6 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
     );
   }
 
-  // Update booking → paid
   await query(
     `UPDATE bookings b
        JOIN vendors v ON v.id = b.vendor_id
@@ -656,15 +533,12 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
 
   console.log(`[COIN-CONFIRM] ✅ Booking ${booking_code} paid via coin (user=${user})`);
 
-  // 1. Invoice email (await, biar tahu hasilnya)
   try {
     await sendInvoiceEmail(booking.id);
-    console.log('[COIN-CONFIRM] ✅ invoice terkirim untuk booking', booking.id);
   } catch (e) {
     console.error('[COIN-CONFIRM] ❌ invoice gagal:', e.message, e.stack);
   }
 
-  // 2. Notifikasi vendor
   try {
     await notifyVendor({
       vendor_id: booking.vendor_id,
@@ -683,12 +557,10 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
         reference: ref,
       },
     });
-    console.log('[COIN-CONFIRM] ✅ notif vendor terkirim');
   } catch (e) {
     console.error('[COIN-CONFIRM] ❌ notif vendor gagal:', e.message);
   }
 
-  // 3. Notifikasi customer via username Jagel (kalau customer login)
   if (booking.user_id) {
     try {
       const { rows: userRows } = await query(
@@ -705,7 +577,6 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
           `Metode: Koin LinkU\n\n` +
           `E-tiket dikirim ke email ${booking.contact_email}. Terima kasih!`
         );
-        console.log('[COIN-CONFIRM] ✅ notif customer terkirim');
       }
     } catch (e) {
       console.error('[COIN-CONFIRM] ❌ notif customer gagal:', e.message);
@@ -749,7 +620,6 @@ const markPaid = async (partner_reff) => {
     return null;
   }
 
-  // ========== HITUNG PEMBAGIAN SESUAI SISTEM ==========
   const totalAmount = Number(p.total_amount);
   const ticketSubtotal = Number(p.ticket_subtotal);
   let platformAmount = 0;
@@ -776,7 +646,6 @@ const markPaid = async (partner_reff) => {
   - Vendor dapat: Rp ${vendorAmount}
   - Platform dapat: Rp ${platformAmount}`);
 
-  // Update payment
   await query(
     `UPDATE payments SET status = 'paid', paid_at = NOW() WHERE gateway_ref = ?`,
     [partner_reff]
@@ -789,7 +658,6 @@ const markPaid = async (partner_reff) => {
     return null;
   }
 
-  // Update booking
   await query(
     `UPDATE bookings
         SET status = 'paid',
@@ -803,9 +671,7 @@ const markPaid = async (partner_reff) => {
     [p.payment_system, commissionAmount, platformAmount, vendorAmount, markupAmount, p.booking_id]
   );
 
-  // ========== ADJUST SALDO JAGEL SESUAI SISTEM ==========
   if (p.payment_system === 'topup') {
-    // Dana penuh langsung masuk ke Jagel milik VENDOR, tanpa potongan
     if (p.vendor_owner_username) {
       try {
         await adjustJagelSaldo(
@@ -816,13 +682,11 @@ const markPaid = async (partner_reff) => {
         console.log(`[markPaid] ✅ Rp ${totalAmount} masuk Jagel vendor @${p.vendor_owner_username}`);
       } catch (e) {
         console.error(`[markPaid] ❌ gagal kredit Jagel vendor @${p.vendor_owner_username}:`, e.message);
-        // booking tetap paid; butuh rekonsiliasi manual kalau gagal
       }
     } else {
       console.error('[markPaid] ❌ vendor tidak punya username Jagel, tidak bisa adjust saldo');
     }
   } else if (p.payment_system === 'commission' || p.payment_system === 'markup') {
-    // Dana DITAMPUNG (escrow) di Jagel akun LinkU (amir) dulu, menunggu payout ke vendor
     try {
       await adjustJagelSaldo(
         LINKU_JAGEL_USERNAME,
@@ -836,7 +700,6 @@ const markPaid = async (partner_reff) => {
     }
   }
 
-  // ========== NOTIFIKASI VENDOR (rincian lengkap) ==========
   try {
     await notifyVendor({
       vendor_id: p.vendor_id,
@@ -863,13 +726,13 @@ const markPaid = async (partner_reff) => {
     console.error('[markPaid] ❌ notif vendor gagal:', e.message);
   }
 
-  // Invoice email
   sendInvoiceEmail(p.booking_id).catch(err =>
     console.error('[INVOICE] async error:', err.message)
   );
 
   return p.booking_id;
 };
+
 // =====================================================================
 // POST /api/payments/callback
 // =====================================================================
@@ -994,5 +857,5 @@ module.exports = {
   checkCoinBalance,
   payWithCoin,
   getVendorNotifications,
-  adjustJagelSaldo,
+  adjustJagelSaldo,   // re-export dari utils/jagel
 };
