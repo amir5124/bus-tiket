@@ -63,57 +63,140 @@ const getVendorDetail = asyncHandler(async (req, res) => {
 
 /** Verifikasi / setujui vendor pending -> active */
 const approveVendor = asyncHandler(async (req, res) => {
-  const { rows } = await query(
-    `UPDATE vendors
-        SET status = 'active', verified_at = NOW(), verified_by = $2
-      WHERE id = $1 AND status = 'pending'
-      RETURNING *`,
-    [req.params.id, req.adminUserRowId]
+  const vendorId = Number(req.params.id);
+  if (!vendorId) return res.status(400).json({ success: false, message: 'ID vendor tidak valid' });
+
+  console.log('[approveVendor] vendorId =', vendorId, 'adminUserRowId =', req.adminUserRowId);
+
+  // 1. Cek status
+  const { rows: check } = await query(
+    `SELECT id, status FROM vendors WHERE id = ? LIMIT 1`,
+    [vendorId]
   );
-  if (!rows.length) return res.status(400).json({ success: false, message: 'Vendor tidak dalam status pending' });
+  console.log('[approveVendor] check =', JSON.stringify(check));
+
+  if (!check.length) {
+    return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  }
+  if (check[0].status !== 'pending') {
+    return res.status(400).json({
+      success: false,
+      message: `Vendor tidak dalam status pending (saat ini: ${check[0].status})`
+    });
+  }
+
+  // 2. Update — TANPA RETURNING *
+  const adminId = req.adminUserRowId ? Number(req.adminUserRowId) : null;
+  const upd = await query(
+    `UPDATE vendors
+        SET status = 'active',
+            verified_at = NOW(),
+            verified_by = ?,
+            rejected_reason = NULL
+      WHERE id = ? AND status = 'pending'`,
+    [adminId, vendorId]
+  );
+  console.log('[approveVendor] updateResult =', JSON.stringify(upd));
+
+  // 3. SELECT ulang
+  const { rows } = await query(
+    `SELECT * FROM vendors WHERE id = ? LIMIT 1`,
+    [vendorId]
+  );
+  console.log('[approveVendor] after =', JSON.stringify(rows[0]));
+
+  if (!rows.length || rows[0].status !== 'active') {
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal update status vendor',
+      debug: process.env.NODE_ENV !== 'production' ? { check, updateResult: upd, after: rows[0] } : undefined,
+    });
+  }
+
   ok(res, rows[0]);
 });
-
 /** Tolak vendor pending */
 const rejectVendor = asyncHandler(async (req, res) => {
-  const { reason } = req.body;
-  const { rows } = await query(
-    `UPDATE vendors
-        SET status = 'rejected', rejected_reason = $2
-      WHERE id = $1 AND status = 'pending'
-      RETURNING *`,
-    [req.params.id, reason || null]
+  const vendorId = Number(req.params.id);
+  if (!vendorId) return res.status(400).json({ success: false, message: 'ID vendor tidak valid' });
+
+  const { reason } = req.body || {};
+
+  const { rows: check } = await query(
+    `SELECT id, status FROM vendors WHERE id = ? LIMIT 1`,
+    [vendorId]
   );
-  if (!rows.length) return res.status(400).json({ success: false, message: 'Vendor tidak dalam status pending' });
+  if (!check.length) return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  if (check[0].status !== 'pending') {
+    return res.status(400).json({
+      success: false,
+      message: `Vendor tidak dalam status pending (saat ini: ${check[0].status})`
+    });
+  }
+
+  const adminId = req.adminUserRowId ? Number(req.adminUserRowId) : null;
+  await query(
+    `UPDATE vendors
+        SET status = 'rejected',
+            rejected_reason = ?,
+            verified_at = NOW(),
+            verified_by = ?
+      WHERE id = ? AND status = 'pending'`,
+    [reason || 'Tidak memenuhi syarat', adminId, vendorId]
+  );
+
+  const { rows } = await query(`SELECT * FROM vendors WHERE id = ? LIMIT 1`, [vendorId]);
   ok(res, rows[0]);
 });
 
 /** Suspend vendor aktif */
 const suspendVendor = asyncHandler(async (req, res) => {
+  const vendorId = Number(req.params.id);
+  if (!vendorId) return res.status(400).json({ success: false, message: 'ID vendor tidak valid' });
+
   const { reason } = req.body || {};
-  const { rows } = await query(
-    `UPDATE vendors
-        SET status = 'suspended', rejected_reason = COALESCE($2, rejected_reason)
-      WHERE id = $1 AND status = 'active'
-      RETURNING *`,
-    [req.params.id, reason || null]
+
+  const { rows: check } = await query(
+    `SELECT id, status FROM vendors WHERE id = ? LIMIT 1`,
+    [vendorId]
   );
-  if (!rows.length) return res.status(400).json({ success: false, message: 'Vendor tidak dalam status active' });
+  if (!check.length) return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  if (check[0].status !== 'active') {
+    return res.status(400).json({
+      success: false,
+      message: `Vendor tidak dalam status active (saat ini: ${check[0].status})`
+    });
+  }
+
+  await query(
+    `UPDATE vendors
+        SET status = 'suspended',
+            rejected_reason = ?
+      WHERE id = ? AND status = 'active'`,
+    [reason || 'Disuspend oleh admin', vendorId]
+  );
+
+  const { rows } = await query(`SELECT * FROM vendors WHERE id = ? LIMIT 1`, [vendorId]);
   ok(res, rows[0]);
 });
 
 /** Ubah komisi vendor */
 const setCommission = asyncHandler(async (req, res) => {
+  const vendorId = Number(req.params.id);
   const { commission_percent } = req.body || {};
   const p = Number(commission_percent);
+
+  if (!vendorId) return res.status(400).json({ success: false, message: 'ID vendor tidak valid' });
   if (!Number.isFinite(p) || p < 0 || p > 100) {
     return res.status(400).json({ success: false, message: 'commission_percent harus 0-100' });
   }
 
-  const { rows } = await query(
-    `UPDATE vendors SET commission_percent = $2 WHERE id = $1 RETURNING *`,
-    [req.params.id, p]
+  await query(
+    `UPDATE vendors SET commission_percent = ? WHERE id = ?`,
+    [p, vendorId]
   );
+
+  const { rows } = await query(`SELECT * FROM vendors WHERE id = ? LIMIT 1`, [vendorId]);
   if (!rows.length) return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
   ok(res, rows[0]);
 });
