@@ -88,4 +88,46 @@ const deleteVendorRoute = asyncHandler(async (req, res) => {
     ok(res, { deleted: true, id: Number(id) });
 });
 
-module.exports = { listVendorRoutes, createVendorRoute, deleteVendorRoute };
+const updateVendorRoute = asyncHandler(async (req, res) => {
+    const vendorId = Number(req.vendorId);
+    const routeId = Number(req.params.id);
+
+    const { rows: existing } = await query(
+        `SELECT id FROM routes WHERE id = ? AND vendor_id = ? LIMIT 1`,
+        [routeId, vendorId]
+    );
+    if (!existing.length) {
+        return res.status(404).json({ success: false, message: 'Rute tidak ditemukan' });
+    }
+
+    const allowed = ['origin_city_id', 'destination_city_id', 'name'];
+    const sets = [];
+    const values = [];
+    for (const key of allowed) {
+        if (req.body[key] !== undefined && req.body[key] !== '') {
+            let v = req.body[key];
+            if (['origin_city_id', 'destination_city_id'].includes(key)) v = Number(v);
+            sets.push(`${key} = ?`);
+            values.push(v);
+        }
+    }
+
+    if (!sets.length) {
+        return res.status(400).json({ success: false, message: 'Tidak ada field untuk diupdate' });
+    }
+
+    values.push(routeId, vendorId);
+    await query(`UPDATE routes SET ${sets.join(', ')} WHERE id = ? AND vendor_id = ?`, values);
+
+    const { rows } = await query(
+        `SELECT r.*, oc.name AS origin_city, dc.name AS destination_city
+         FROM routes r
+         JOIN cities oc ON oc.id = r.origin_city_id
+         JOIN cities dc ON dc.id = r.destination_city_id
+        WHERE r.id = ?`,
+        [routeId]
+    );
+    ok(res, rows[0]);
+});
+
+module.exports = { listVendorRoutes, createVendorRoute, updateVendorRoute, deleteVendorRoute };
