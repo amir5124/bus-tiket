@@ -49,6 +49,7 @@ const registerVendor = asyncHandler(async (req, res) => {
     contact_phone, contact_email,
     payment_system = 'commission',
     markup_percent = 0,
+    commission_percent = 5.00, // default hanya dipakai kalau system === 'commission'
   } = req.body || {};
 
   if (!name) {
@@ -75,7 +76,10 @@ const registerVendor = asyncHandler(async (req, res) => {
   }
 
   const code = randomCode('VND');
+
+  // Hanya isi persen sesuai payment_system yang dipilih; yang lain dipaksa 0
   const markupPct = system === 'markup' ? (Number(markup_percent) || 0) : 0;
+  const commissionPct = system === 'commission' ? (Number(commission_percent) || 0) : 0;
 
   const result = await withTransaction(async (client) => {
     const r = await client.query(
@@ -83,12 +87,12 @@ const registerVendor = asyncHandler(async (req, res) => {
          (code, name, legal_name, address, npwp, nib,
           contact_phone, contact_email, owner_user_id,
           status, payment_system, commission_percent, markup_percent, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 5.00, ?, NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NOW())`,
       [
         code, name, legal_name || null, address || null,
         npwp || null, nib || null,
         contact_phone || null, contact_email || null,
-        req.user.id, system, markupPct,
+        req.user.id, system, commissionPct, markupPct,
       ]
     );
     const vendorId = r.insertId;
@@ -118,7 +122,6 @@ const registerVendor = asyncHandler(async (req, res) => {
 
   created(res, result);
 });
-
 /* =====================================================================
  * GET MY VENDOR PROFILE
  * ===================================================================== */
