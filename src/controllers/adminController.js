@@ -38,27 +38,103 @@ const listVendors = asyncHandler(async (req, res) => {
 
 /** Detail vendor + armada, bank account, staff */
 const getVendorDetail = asyncHandler(async (req, res) => {
-  const { rows } = await query(`SELECT * FROM v_vendor_profile WHERE vendor_id = $1`, [req.params.id]);
-  if (!rows.length) return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  const vendorId = Number(req.params.id);
+  if (!vendorId) {
+    return res.status(400).json({ success: false, message: 'ID vendor tidak valid' });
+  }
 
+  // 1. Ambil data vendor + owner
+  const { rows } = await query(
+    `SELECT 
+        v.id,
+        v.code,
+        v.owner_user_id,
+        v.name,
+        v.legal_name,
+        v.npwp,
+        v.nib,
+        v.contact_phone,
+        v.contact_email,
+        v.address,
+        v.logo_url,
+        v.description,
+        v.status,
+        v.commission_percent,
+        v.rating_avg,
+        v.rating_count,
+        v.verified_at,
+        v.verified_by,
+        v.rejected_reason,
+        v.created_at,
+        v.updated_at,
+        u.username   AS owner_username,
+        u.full_name  AS owner_name,
+        u.phone      AS owner_phone,
+        u.email      AS owner_email,
+        u.jagel_user_id AS owner_jagel_user_id
+       FROM vendors v
+       JOIN app_users u ON u.id = v.owner_user_id
+      WHERE v.id = ?
+      LIMIT 1`,
+    [vendorId]
+  );
+  if (!rows.length) {
+    return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  }
+  const vendor = rows[0];
+
+  // 2. Armada
   const { rows: vehicles } = await query(
-    `SELECT v.*, (SELECT url FROM vehicle_photos WHERE vehicle_id = v.id AND is_cover LIMIT 1) AS cover_photo
-       FROM vehicles v WHERE v.vendor_id = $1 ORDER BY v.created_at DESC`,
-    [req.params.id]
+    `SELECT v.*,
+            (SELECT url FROM vehicle_photos 
+              WHERE vehicle_id = v.id AND is_cover = 1 
+              LIMIT 1) AS cover_photo
+       FROM vehicles v
+      WHERE v.vendor_id = ?
+      ORDER BY v.created_at DESC`,
+    [vendorId]
   );
+
+  // 3. Bank accounts
   const { rows: banks } = await query(
-    `SELECT * FROM vendor_bank_accounts WHERE vendor_id = $1`,
-    [req.params.id]
+    `SELECT id, bank_name, account_number, account_holder, is_primary, created_at
+       FROM vendor_bank_accounts
+      WHERE vendor_id = ?
+      ORDER BY is_primary DESC, id`,
+    [vendorId]
   );
+
+  // 4. Members
   const { rows: members } = await query(
-    `SELECT vm.role, u.username, u.full_name, u.phone
+    `SELECT vm.role, vm.notify_enabled,
+            u.username, u.full_name, u.phone, u.email
        FROM vendor_members vm
        JOIN app_users u ON u.id = vm.user_id
-      WHERE vm.vendor_id = $1`,
-    [req.params.id]
+      WHERE vm.vendor_id = ?
+      ORDER BY vm.role DESC`,
+    [vendorId]
   );
 
-  ok(res, { ...rows[0], vehicles, bank_accounts: banks, members });
+  // 5. Bank accounts
+  const { rows: schedules } = await query(
+    `SELECT COUNT(*) AS total,
+            SUM(status = 'published') AS published,
+            SUM(status = 'draft') AS draft
+       FROM schedules
+      WHERE vendor_id = ?`,
+    [vendorId]
+  );
+
+  res.json({
+    success: true,
+    data: {
+      ...vendor,
+      vehicles,
+      bank_accounts: banks,
+      members,
+      schedule_stats: schedules[0] || { total: 0, published: 0, draft: 0 },
+    },
+  });
 });
 
 /** Verifikasi / setujui vendor pending -> active */
