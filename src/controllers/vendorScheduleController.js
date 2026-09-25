@@ -37,8 +37,10 @@ const listVendorSchedules = asyncHandler(async (req, res) => {
 
 /**
  * POST /api/vendors/:vendorId/schedules
+ * Handle sistem: commission / markup / topup
  */
 const createVendorSchedule = asyncHandler(async (req, res) => {
+    const vendorId = Number(req.vendorId);
     const {
         route_id, vehicle_id, pickup_stop_id, dropoff_stop_id,
         departure_at, arrival_at, price, original_price, discount_percent,
@@ -48,30 +50,72 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
     if (!route_id || !vehicle_id || !departure_at || !price) {
         return res.status(400).json({
             success: false,
-            message: 'route_id, vehicle_id, departure_at, price wajib diisi'
+            message: 'route_id, vehicle_id, departure_at, price wajib diisi',
         });
     }
 
-    // Validasi route milik vendor
+    // 1. Ambil data vendor
+    const { rows: vendors } = await query(
+        `SELECT id, payment_system, markup_percent, status, topup_active_until
+       FROM vendors WHERE id = ? LIMIT 1`,
+        [vendorId]
+    );
+    if (!vendors.length) {
+        return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+    }
+    const vendor = vendors[0];
+
+    // 2. Cek status vendor
+    if (vendor.status !== 'active') {
+        return res.status(403).json({
+            success: false,
+            message: `Vendor belum aktif (status: ${vendor.status})`,
+        });
+    }
+
+    // 3. Cek topup kalau sistem topup
+    if (vendor.payment_system === 'topup') {
+        const activeUntil = vendor.topup_active_until ? new Date(vendor.topup_active_until) : null;
+        if (!activeUntil || activeUntil < new Date()) {
+            return res.status(403).json({
+                success: false,
+                message: 'Masa aktif topup habis. Silakan perpanjang topup untuk upload jadwal.',
+                topup_active_until: vendor.topup_active_until,
+            });
+        }
+    }
+
+    // 4. Hitung harga jual
+    const priceVendor = Number(price);
+    let priceJual = priceVendor;
+    let markupAmount = 0;
+
+    if (vendor.payment_system === 'markup') {
+        const markupPct = Number(vendor.markup_percent) || 0;
+        markupAmount = Math.round(priceVendor * markupPct / 100);
+        priceJual = priceVendor + markupAmount;
+    }
+
+    // 5. Validasi route
     const { rows: routeRows } = await query(
         `SELECT id FROM routes WHERE id = ? AND vendor_id = ?`,
-        [route_id, req.vendorId]
+        [route_id, vendorId]
     );
     if (!routeRows.length) {
         return res.status(404).json({ success: false, message: 'Rute tidak ditemukan' });
     }
 
-    // Validasi vehicle milik vendor
+    // 6. Validasi vehicle
     const { rows: vehRows } = await query(
         `SELECT id, capacity, seat_layout_id FROM vehicles
       WHERE id = ? AND vendor_id = ? AND is_active = 1`,
-        [vehicle_id, req.vendorId]
+        [vehicle_id, vendorId]
     );
     if (!vehRows.length) {
         return res.status(404).json({ success: false, message: 'Armada tidak ditemukan / nonaktif' });
     }
 
-    // Hitung arrival_at default: departure + 3 jam
+    // 7. Hitung arrival_at
     let finalArrival = arrival_at;
     if (!finalArrival) {
         const depDate = new Date(String(departure_at).replace(' ', 'T'));
@@ -79,8 +123,9 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
         finalArrival = depDate.toISOString().slice(0, 19).replace('T', ' ');
     }
 
-    const scheduleCode = `SCH-${req.vendorId}-${Date.now()}`;
+    const scheduleCode = `SCH-${vendorId}-${Date.now()}`;
 
+    // 8. Insert schedule dengan price = harga jual
     const result = await query(
         `INSERT INTO schedules
        (schedule_code, vendor_id, route_id, vehicle_id, direction,
@@ -90,17 +135,20 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
         is_popular, status, created_by, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, NOW())`,
         [
-            scheduleCode, req.vendorId, route_id, vehicle_id, direction || 'pergi',
+            scheduleCode, vendorId, route_id, vehicle_id, direction || 'pergi',
             pickup_stop_id || null, dropoff_stop_id || null,
-            departure_at, finalArrival, price, original_price || null,
-            discount_percent || 0, insurance_available ? 1 : 0,
+            departure_at, finalArrival,
+            priceJual,                              // ← harga jual (setelah markup)
+            original_price || null,
+            discount_percent || 0,
+            insurance_available ? 1 : 0,
             insurance_available ? (insurance_product_id || 1) : null,
             is_popular ? 1 : 0,
             req.user.id,
         ]
     );
 
-    // Seed kursi otomatis dari seat_layout_cells
+    // 9. Seed kursi
     await query(
         `INSERT INTO schedule_seats (schedule_id, seat_number)
      SELECT ?, c.seat_number
@@ -111,7 +159,7 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
         [result.insertId, vehicle_id]
     );
 
-    // Update counter seats_total & seats_available
+    // 10. Update counter
     await query(
         `UPDATE schedules s
         SET s.seats_total = (SELECT COUNT(*) FROM schedule_seats WHERE schedule_id = s.id),
@@ -121,7 +169,15 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
     );
 
     const { rows } = await query(`SELECT * FROM schedules WHERE id = ?`, [result.insertId]);
-    created(res, rows[0]);
+    created(res, {
+        ...rows[0],
+        _info: {
+            payment_system: vendor.payment_system,
+            price_vendor: priceVendor,
+            price_customer: priceJual,
+            markup_amount: markupAmount,
+        },
+    });
 });
 
 /**
@@ -177,7 +233,7 @@ const deleteVendorSchedule = asyncHandler(async (req, res) => {
     if (Number(bkRows[0].n) > 0) {
         return res.status(409).json({
             success: false,
-            message: 'Jadwal tidak bisa dihapus karena sudah ada booking yang dibayar.'
+            message: 'Jadwal tidak bisa dihapus karena sudah ada booking yang dibayar.',
         });
     }
 
@@ -194,11 +250,38 @@ const publishVendorSchedule = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const { rows } = await query(
-        `SELECT id, status, seats_total FROM schedules WHERE id = ? AND vendor_id = ?`,
+        `SELECT id, status FROM schedules WHERE id = ? AND vendor_id = ?`,
         [id, req.vendorId]
     );
     if (!rows.length) {
         return res.status(404).json({ success: false, message: 'Jadwal tidak ditemukan' });
+    }
+
+    // Cek vendor
+    const { rows: vendors } = await query(
+        `SELECT id, status, payment_system, topup_active_until
+         FROM vendors WHERE id = ? LIMIT 1`,
+        [req.vendorId]
+    );
+    const vendor = vendors[0];
+
+    if (vendor.status !== 'active') {
+        return res.status(403).json({
+            success: false,
+            message: `Vendor belum aktif (status: ${vendor.status}).`,
+        });
+    }
+
+    if (vendor.payment_system === 'topup') {
+        const activeUntil = vendor.topup_active_until ? new Date(vendor.topup_active_until) : null;
+        if (!activeUntil || activeUntil < new Date()) {
+            return res.status(403).json({
+                success: false,
+                message: 'Masa aktif topup habis. Lakukan topup Rp 50.000 untuk publish jadwal.',
+                need_topup: true,
+                topup_active_until: vendor.topup_active_until,
+            });
+        }
     }
 
     await query(

@@ -43,6 +43,45 @@ const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
     console.warn('⏱️  [Server] Expiry job TIDAK dijalankan karena database tidak terhubung.');
   }
 
+  // Cron: auto-unpublish topup expired (setiap 30 menit)
+  setInterval(async () => {
+    try {
+      const { query } = require('./src/config/db');
+
+      const { rows: expiredVendors } = await query(
+        `SELECT id, name FROM vendors
+        WHERE payment_system = 'topup'
+          AND status = 'active'
+          AND topup_active_until IS NOT NULL
+          AND topup_active_until < NOW()`
+      );
+
+      for (const v of expiredVendors) {
+        const r = await query(
+          `UPDATE schedules SET status = 'unpublished'
+          WHERE vendor_id = ? AND status = 'published'`,
+          [v.id]
+        );
+
+        if (r.rowCount > 0) {
+          await query(
+            `INSERT INTO notifications
+             (recipient_user_id, vendor_id, type, channel, title, body, data)
+           SELECT vm.user_id, ?, 'system', 'in_app',
+                  'Topup expired',
+                  'Masa aktif topup habis. Jadwal di-unpublish. Silakan topup ulang.',
+                  JSON_OBJECT('vendor_id', ?)
+             FROM vendor_members vm
+            WHERE vm.vendor_id = ? AND vm.role = 'owner'`,
+            [v.id, v.id, v.id]
+          );
+          console.log(`[TOPUP-CRON] Vendor ${v.id} (${v.name}): ${r.rowCount} jadwal di-unpublish`);
+        }
+      }
+    } catch (e) {
+      console.error('[TOPUP-CRON]', e.message);
+    }
+  }, 30 * 60 * 1000);
   // -----------------------------------------------------------------
   // 4. Graceful shutdown
   // -----------------------------------------------------------------

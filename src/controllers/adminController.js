@@ -515,6 +515,62 @@ const listAuditLogs = asyncHandler(async (req, res) => {
   ok(res, rows, buildMeta(page, limit, countRows[0].count));
 });
 
+/**
+ * PATCH /api/admin/vendors/:id/payment-system
+ * Body: { payment_system, commission_percent, markup_percent }
+ */
+const setVendorPaymentSystem = asyncHandler(async (req, res) => {
+  const vendorId = Number(req.params.id);
+  const { payment_system, commission_percent, markup_percent } = req.body || {};
+
+  const validSystems = ['topup', 'commission', 'markup'];
+  if (!validSystems.includes(payment_system)) {
+    return res.status(400).json({ success: false, message: 'payment_system tidak valid' });
+  }
+
+  const { rows: existing } = await query(
+    `SELECT id, payment_system, commission_percent, markup_percent
+       FROM vendors WHERE id = ? LIMIT 1`,
+    [vendorId]
+  );
+  if (!existing.length) {
+    return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  }
+  const old = existing[0];
+
+  const pct = commission_percent !== undefined ? Number(commission_percent) : Number(old.commission_percent);
+  const mpct = markup_percent !== undefined ? Number(markup_percent) : Number(old.markup_percent);
+
+  if (pct < 0 || pct > 100) return res.status(400).json({ success: false, message: 'commission 0-100' });
+  if (mpct < 0 || mpct > 100) return res.status(400).json({ success: false, message: 'markup 0-100' });
+
+  await query(
+    `UPDATE vendors 
+        SET payment_system = ?,
+            commission_percent = ?,
+            markup_percent = ?
+      WHERE id = ?`,
+    [payment_system, pct, mpct, vendorId]
+  );
+
+  // Log markup change
+  if (Number(old.markup_percent) !== mpct) {
+    await query(
+      `INSERT INTO vendor_markup_logs 
+         (vendor_id, old_percent, new_percent, changed_by, note)
+       VALUES (?, ?, ?, ?, ?)`,
+      [vendorId, old.markup_percent, mpct, req.user.id, 'Admin update markup']
+    );
+  }
+
+  const { rows } = await query(
+    `SELECT id, name, payment_system, commission_percent, markup_percent
+       FROM vendors WHERE id = ?`,
+    [vendorId]
+  );
+  ok(res, rows[0]);
+});
+
 /* =====================================================================
  * EXPORTS
  * ===================================================================== */
@@ -526,7 +582,7 @@ module.exports = {
   rejectVendor,
   suspendVendor,
   setCommission,
-
+  setVendorPaymentSystem,
   // Armada
   listAllVehicles,
 

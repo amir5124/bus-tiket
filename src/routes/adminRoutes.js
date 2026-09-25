@@ -60,6 +60,11 @@ router.get('/summary/vendor-sales', adminCtrl.vendorSales);
 router.get('/refunds', requireAdmin('finance'), adminCtrl.listRefunds);
 router.post('/refunds/:id/review', requireAdmin('finance'), adminCtrl.reviewRefund);
 
+router.patch('/vendors/:id/payment-system',
+  requireAdmin('finance'),
+  adminCtrl.setVendorPaymentSystem
+);
+
 /* =====================================================================
  * AUDIT LOG
  * ===================================================================== */

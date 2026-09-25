@@ -719,9 +719,12 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
 const markPaid = async (partner_reff) => {
   const { rows } = await query(
     `SELECT p.booking_id, p.amount, p.status AS payment_status,
-            b.status AS booking_status, b.total_amount
+            b.status AS booking_status, b.total_amount, b.ticket_subtotal,
+            b.vendor_id,
+            v.payment_system, v.commission_percent, v.markup_percent
        FROM payments p
        JOIN bookings b ON b.id = p.booking_id
+       JOIN vendors v ON v.id = b.vendor_id
       WHERE p.gateway_ref = ?
       LIMIT 1`,
     [partner_reff]
@@ -738,15 +741,45 @@ const markPaid = async (partner_reff) => {
   }
 
   if (Number(p.amount) < Number(p.total_amount)) {
-    console.error('[markPaid] nominal kurang dari total booking', partner_reff);
+    console.error('[markPaid] nominal kurang', partner_reff);
     return null;
   }
 
+  // ========== HITUNG PEMBAGIAN SESUAI SISTEM ==========
+  const totalAmount = Number(p.total_amount);
+  const ticketSubtotal = Number(p.ticket_subtotal);
+  let platformAmount = 0;
+  let vendorAmount = totalAmount;
+  let markupAmount = 0;
+  let commissionAmount = 0;
+
+  if (p.payment_system === 'commission') {
+    // Platform ambil % dari tiket
+    commissionAmount = Math.round(ticketSubtotal * Number(p.commission_percent) / 100);
+    platformAmount = commissionAmount;
+    vendorAmount = totalAmount - platformAmount;
+
+  } else if (p.payment_system === 'markup') {
+    // Platform ambil selisih markup
+    markupAmount = Math.round(ticketSubtotal * Number(p.markup_percent) / 100);
+    platformAmount = markupAmount;
+    vendorAmount = totalAmount - markupAmount;
+
+  } else if (p.payment_system === 'topup') {
+    // Semua ke vendor (topup sudah dibayar di muka)
+    platformAmount = 0;
+    vendorAmount = totalAmount;
+  }
+
+  console.log(`[markPaid] ✅ booking ${p.booking_id} paid
+  - Sistem: ${p.payment_system}
+  - Total: Rp ${totalAmount}
+  - Vendor dapat: Rp ${vendorAmount}
+  - Platform dapat: Rp ${platformAmount}`);
+
+  // Update payment
   await query(
-    `UPDATE payments
-        SET status = 'paid',
-            paid_at = NOW()
-      WHERE gateway_ref = ?`,
+    `UPDATE payments SET status = 'paid', paid_at = NOW() WHERE gateway_ref = ?`,
     [partner_reff]
   );
 
@@ -757,80 +790,31 @@ const markPaid = async (partner_reff) => {
     return null;
   }
 
+  // Update booking
   await query(
-    `UPDATE bookings b
-       JOIN vendors v ON v.id = b.vendor_id
-        SET b.status            = 'paid',
-            b.paid_at           = NOW(),
-            b.commission_amount = ROUND(b.ticket_subtotal * v.commission_percent / 100)
-      WHERE b.id = ? AND b.status = 'pending_payment'`,
-    [p.booking_id]
+    `UPDATE bookings
+        SET status = 'paid',
+            paid_at = NOW(),
+            payment_system = ?,
+            commission_amount = ?,
+            platform_amount = ?,
+            vendor_amount = ?,
+            markup_amount = ?
+      WHERE id = ? AND status = 'pending_payment'`,
+    [
+      p.payment_system,
+      commissionAmount,
+      platformAmount,
+      vendorAmount,
+      markupAmount,
+      p.booking_id,
+    ]
   );
 
-  console.log('[markPaid] ✅ booking', p.booking_id, 'jadi paid');
-
   // Invoice email
-  try {
-    await sendInvoiceEmail(p.booking_id);
-    console.log('[markPaid] ✅ invoice terkirim untuk booking', p.booking_id);
-  } catch (e) {
-    console.error('[markPaid] ❌ invoice gagal:', e.message);
-  }
-
-  // Notif vendor
-  try {
-    const { rows: vRows } = await query(
-      `SELECT v.id AS vendor_id, v.name AS vendor_name,
-              v.contact_email AS vendor_email, v.contact_phone AS vendor_phone,
-              b.booking_code, b.order_no, b.contact_name, b.seats_count, b.total_amount
-         FROM bookings b
-         JOIN vendors v ON v.id = b.vendor_id
-        WHERE b.id = ? LIMIT 1`,
-      [p.booking_id]
-    );
-    if (vRows.length) {
-      const v = vRows[0];
-      await notifyVendor({
-        vendor_id: v.vendor_id,
-        vendor_name: v.vendor_name,
-        vendor_email: v.vendor_email,
-        vendor_phone: v.vendor_phone,
-        type: 'payment_paid',
-        title: `Pembayaran diterima — ${v.booking_code}`,
-        body: `Customer ${v.contact_name} membayar ${v.seats_count} kursi via VA/QRIS.`,
-        data: {
-          booking_code: v.booking_code,
-          order_no: v.order_no,
-          amount: v.total_amount,
-          method: 'VA/QRIS',
-          reference: partner_reff,
-        },
-      });
-    }
-  } catch (e) {
-    console.error('[markPaid] notifyVendor gagal:', e.message);
-  }
-
-  // Notif customer via username Jagel (kalau customer login)
-  try {
-    const { rows: bRows } = await query(
-      `SELECT b.user_id, u.username
-         FROM bookings b
-         LEFT JOIN app_users u ON u.id = b.user_id
-        WHERE b.id = ? LIMIT 1`,
-      [p.booking_id]
-    );
-    if (bRows.length && bRows[0].username) {
-      await notifyCustomerByUsername(
-        bRows[0].username,
-        `✅ Pembayaran BERHASIL\n\n` +
-        `Total: Rp ${Number(p.amount).toLocaleString('id-ID')}\n\n` +
-        `E-tiket dikirim ke email Anda. Terima kasih!`
-      );
-    }
-  } catch (e) {
-    console.error('[markPaid] notifyCustomer gagal:', e.message);
-  }
+  sendInvoiceEmail(p.booking_id).catch(err =>
+    console.error('[INVOICE] async error:', err.message)
+  );
 
   return p.booking_id;
 };
