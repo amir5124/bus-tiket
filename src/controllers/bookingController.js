@@ -106,7 +106,7 @@ const createBooking = asyncHandler(async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        // ✅ Tambahkan s.discount_percent
+        // ✅ Ambil discount_percent dari schedules
         const [[s]] = await conn.query(
             `SELECT s.id, s.vendor_id, s.price, s.original_price, s.discount_percent,
                     s.insurance_available, s.insurance_product_id,
@@ -127,38 +127,39 @@ const createBooking = asyncHandler(async (req, res) => {
         if (seatRows.length !== n) throw fail(400, 'Ada nomor kursi yang tidak valid');
 
         // ============================================================
-        // ✅ HITUNG HARGA (server-side, tidak percaya client)
+        // HITUNG HARGA (server-side)
         // ============================================================
-        const unit = Number(s.price);                                       // harga per kursi (sudah termasuk harga dasar)
-        const orig = s.original_price && Number(s.original_price) > unit
-            ? Number(s.original_price)
-            : unit;
+        const unit = Number(s.price);                                       // harga jual per kursi
         const insTotal = wantIns ? Number(s.price_per_passenger) * n : 0;
 
-        const ticketSubtotal = unit * n;                                    // harga jual × jumlah kursi
+        const ticketSubtotal = unit * n;                                    // subtotal tiket
         const discPct = Number(s.discount_percent) || 0;                    // diskon dari DB
         const discountTotal = Math.round(ticketSubtotal * discPct / 100);   // diskon Rp
-        const totalAmount = ticketSubtotal + insTotal - discountTotal;      // ✅ harga akhir
 
-        console.log(`[BOOKING] unit=${unit} x ${n} kursi | subtotal=${ticketSubtotal} | disc=${discPct}% (${discountTotal}) | ins=${insTotal} | total=${totalAmount}`);
+        // total_amount TIDAK dihitung di sini — MySQL hitung otomatis dari:
+        //   (ticket_subtotal + insurance_total) - discount_total + fee_total
+        // fee_total default 0, jadi total_amount = ticketSubtotal + insTotal - discountTotal
+
+        console.log(`[BOOKING] unit=${unit} x ${n} | subtotal=${ticketSubtotal} | disc=${discPct}% (${discountTotal}) | ins=${insTotal} | total(excl. fee)=${ticketSubtotal + insTotal - discountTotal}`);
 
         let bookingId = null;
         for (let i = 0; i < 3 && !bookingId; i++) {
             const code = 'BT' + Date.now().toString(36).toUpperCase() + crypto.randomInt(0, 46656).toString(36).toUpperCase().padStart(3, '0');
             const order = String(crypto.randomInt(1000000000, 9999999999));
             try {
+                // ✅ total_amount TIDAK dimasukkan ke INSERT (generated column)
                 const [ins] = await conn.query(
                     `INSERT INTO bookings (booking_code, order_no, user_id, buyer_username, schedule_id, vendor_id,
                         contact_title, contact_name, contact_phone, contact_email, seats_count,
-                        ticket_subtotal, insurance_total, discount_total, total_amount,
+                        ticket_subtotal, insurance_total, discount_total,
                         has_insurance, insurance_product_id,
                         terms_accepted, terms_accepted_at, status, expires_at)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NOW(),'pending_payment',NOW() + INTERVAL ${HOLD_MINUTES} MINUTE)`,
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NOW(),'pending_payment',NOW() + INTERVAL ${HOLD_MINUTES} MINUTE)`,
                     [
                         code, order, req.user?.id || null, req.user?.username || null,
                         scheduleId, s.vendor_id,
                         c.title, c.name.trim(), String(c.phone).replace(/[\s-]/g, ''), c.email.trim(), n,
-                        ticketSubtotal, insTotal, discountTotal, totalAmount,
+                        ticketSubtotal, insTotal, discountTotal,
                         wantIns ? 1 : 0, wantIns ? s.insurance_product_id : null,
                     ]);
                 bookingId = ins.insertId;
