@@ -106,26 +106,41 @@ const createBooking = asyncHandler(async (req, res) => {
     try {
         await conn.beginTransaction();
 
+        // ✅ Tambahkan s.discount_percent
         const [[s]] = await conn.query(
-            `SELECT s.id, s.vendor_id, s.price, s.original_price, s.insurance_available, s.insurance_product_id,
-              ip.price_per_passenger
-         FROM schedules s
-         JOIN vendors v ON v.id = s.vendor_id AND v.status = 'active'
-         LEFT JOIN insurance_products ip ON ip.id = s.insurance_product_id AND ip.is_active = 1
-        WHERE s.id = ? AND s.status = 'published' AND s.departure_at > NOW()`, [scheduleId]);
+            `SELECT s.id, s.vendor_id, s.price, s.original_price, s.discount_percent,
+                    s.insurance_available, s.insurance_product_id,
+                    ip.price_per_passenger
+               FROM schedules s
+               JOIN vendors v ON v.id = s.vendor_id AND v.status = 'active'
+               LEFT JOIN insurance_products ip ON ip.id = s.insurance_product_id AND ip.is_active = 1
+              WHERE s.id = ? AND s.status = 'published' AND s.departure_at > NOW()`, [scheduleId]);
         if (!s) throw fail(404, 'Jadwal tidak ditemukan atau sudah tidak tersedia');
 
         const wantIns = b.insurance === true;
-        if (wantIns && !(s.insurance_available && s.price_per_passenger)) throw fail(400, 'Jadwal ini tidak menyediakan asuransi');
+        if (wantIns && !(s.insurance_available && s.price_per_passenger))
+            throw fail(400, 'Jadwal ini tidak menyediakan asuransi');
 
         const [seatRows] = await conn.query(
-            'SELECT id, seat_number FROM schedule_seats WHERE schedule_id = ? AND seat_number IN (?)', [scheduleId, seats]);
+            'SELECT id, seat_number FROM schedule_seats WHERE schedule_id = ? AND seat_number IN (?)',
+            [scheduleId, seats]);
         if (seatRows.length !== n) throw fail(400, 'Ada nomor kursi yang tidak valid');
 
-        // harga selalu dihitung server, bukan dari client
-        const unit = Number(s.price);
-        const orig = s.original_price && Number(s.original_price) > unit ? Number(s.original_price) : unit;
+        // ============================================================
+        // ✅ HITUNG HARGA (server-side, tidak percaya client)
+        // ============================================================
+        const unit = Number(s.price);                                       // harga per kursi (sudah termasuk harga dasar)
+        const orig = s.original_price && Number(s.original_price) > unit
+            ? Number(s.original_price)
+            : unit;
         const insTotal = wantIns ? Number(s.price_per_passenger) * n : 0;
+
+        const ticketSubtotal = unit * n;                                    // harga jual × jumlah kursi
+        const discPct = Number(s.discount_percent) || 0;                    // diskon dari DB
+        const discountTotal = Math.round(ticketSubtotal * discPct / 100);   // diskon Rp
+        const totalAmount = ticketSubtotal + insTotal - discountTotal;      // ✅ harga akhir
+
+        console.log(`[BOOKING] unit=${unit} x ${n} kursi | subtotal=${ticketSubtotal} | disc=${discPct}% (${discountTotal}) | ins=${insTotal} | total=${totalAmount}`);
 
         let bookingId = null;
         for (let i = 0; i < 3 && !bookingId; i++) {
@@ -134,15 +149,23 @@ const createBooking = asyncHandler(async (req, res) => {
             try {
                 const [ins] = await conn.query(
                     `INSERT INTO bookings (booking_code, order_no, user_id, buyer_username, schedule_id, vendor_id,
-             contact_title, contact_name, contact_phone, contact_email, seats_count,
-             ticket_subtotal, insurance_total, discount_total, has_insurance, insurance_product_id,
-             terms_accepted, terms_accepted_at, status, expires_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NOW(),'pending_payment',NOW() + INTERVAL ${HOLD_MINUTES} MINUTE)`,
-                    [code, order, req.user?.id || null, req.user?.username || null, scheduleId, s.vendor_id,
+                        contact_title, contact_name, contact_phone, contact_email, seats_count,
+                        ticket_subtotal, insurance_total, discount_total, total_amount,
+                        has_insurance, insurance_product_id,
+                        terms_accepted, terms_accepted_at, status, expires_at)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NOW(),'pending_payment',NOW() + INTERVAL ${HOLD_MINUTES} MINUTE)`,
+                    [
+                        code, order, req.user?.id || null, req.user?.username || null,
+                        scheduleId, s.vendor_id,
                         c.title, c.name.trim(), String(c.phone).replace(/[\s-]/g, ''), c.email.trim(), n,
-                        orig * n, insTotal, (orig - unit) * n, wantIns ? 1 : 0, wantIns ? s.insurance_product_id : null]);
-                bookingId = ins.insertId; bookingCode = code;
-            } catch (e) { if (e.code !== 'ER_DUP_ENTRY' || i === 2) throw e; }
+                        ticketSubtotal, insTotal, discountTotal, totalAmount,
+                        wantIns ? 1 : 0, wantIns ? s.insurance_product_id : null,
+                    ]);
+                bookingId = ins.insertId;
+                bookingCode = code;
+            } catch (e) {
+                if (e.code !== 'ER_DUP_ENTRY' || i === 2) throw e;
+            }
         }
 
         // tahan kursi (anti double-booking)
@@ -152,10 +175,11 @@ const createBooking = asyncHandler(async (req, res) => {
         const rows = ps.map((p, i) => [
             bookingId, i + 1, String(p.name).trim(),
             seatRows.find((r) => r.seat_number === String(p.seat)).id, String(p.seat),
-            wantIns ? 1 : 0, wantIns ? Number(s.price_per_passenger) : 0, `${bookingCode}-${i + 1}`]);
+            wantIns ? 1 : 0, wantIns ? Number(s.price_per_passenger) : 0, `${bookingCode}-${i + 1}`,
+        ]);
         await conn.query(
             `INSERT INTO booking_passengers (booking_id, passenger_no, full_name, schedule_seat_id, seat_number,
-         insurance_selected, insurance_price, ticket_code) VALUES ?`, [rows]);
+                insurance_selected, insurance_price, ticket_code) VALUES ?`, [rows]);
 
         await conn.commit();
     } catch (e) {
