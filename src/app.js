@@ -14,7 +14,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const bookingRoutes = require('./routes/bookingRoutes');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
-
+const UPLOAD_DIR = process.env.UPLOAD_DIR || 'uploads';
 const app = express();
 
 // =====================================================================
@@ -42,10 +42,9 @@ const apiLimiter = rateLimit({
 app.use('/api', apiLimiter);
 
 // Serve foto armada
-app.use(
-    `/${process.env.UPLOAD_DIR || 'uploads'}`,
-    express.static(path.join(process.cwd(), process.env.UPLOAD_DIR || 'uploads'))
-);
+// app.js
+
+app.use(`/${UPLOAD_DIR}`, express.static(path.join(process.cwd(), UPLOAD_DIR)));
 
 app.get('/health', (req, res) =>
     res.json({ success: true, message: 'OK', time: new Date().toISOString() })

@@ -1,6 +1,8 @@
 const { query, withTransaction } = require('../config/db');
 const { asyncHandler, ok, created, getPagination, buildMeta } = require('../utils/helpers');
-const { toPublicUrl } = require('../middleware/upload');
+const path = require('path');
+const fs = require('fs');
+const { toPublicUrl, UPLOAD_DIR } = require('../middleware/upload');
 
 /* ------------------------------------------------------------------ */
 /* SEAT LAYOUT (denah kursi)                                           */
@@ -88,140 +90,135 @@ const listFacilities = asyncHandler(async (req, res) => {
  *   files: photos[] (exterior/interior, multiple)
  */
 const createVehicle = asyncHandler(async (req, res) => {
+  const vendorId = Number(req.vendorId);
+
   const {
-    name, class_name, vehicle_type, plate_number, brand, model, year,
-    seat_arrangement, capacity, seat_layout_id, facility_ids,
+    name, class_name, vehicle_type, plate_number,
+    brand, model, year, seat_arrangement, capacity,
+    seat_layout_id, is_active,
   } = req.body;
 
+  // Validasi
   if (!name || !class_name || !vehicle_type || !capacity || !seat_layout_id) {
+    // Hapus file yang sudah ke-upload kalau validasi gagal
+    if (req.files) req.files.forEach(f => { try { fs.unlinkSync(f.path); } catch (e) { } });
     return res.status(400).json({
       success: false,
-      message: 'name, class_name, vehicle_type, capacity, seat_layout_id wajib diisi',
+      message: 'name, class_name, vehicle_type, capacity, seat_layout_id wajib diisi'
     });
   }
 
-  // Validasi denah kursi milik vendor ini / template platform
-  const { rows: layoutCheck } = await query(
-    `SELECT id, total_seats FROM seat_layouts WHERE id = $1 AND (vendor_id = $2 OR vendor_id IS NULL)`,
-    [seat_layout_id, req.vendorId]
-  );
-  if (!layoutCheck.length) {
-    return res.status(400).json({ success: false, message: 'seat_layout_id tidak valid untuk vendor ini' });
-  }
+  // Facilities dari FormData
+  const rawFac = req.body['facility_ids[]'] ?? req.body.facility_ids ?? [];
+  const facilityIds = Array.isArray(rawFac) ? rawFac : [rawFac];
 
-  let facilityIdList = [];
-  if (facility_ids) {
-    try {
-      facilityIdList = typeof facility_ids === 'string'
-        ? (facility_ids.trim().startsWith('[') ? JSON.parse(facility_ids) : facility_ids.split(',').map((s) => s.trim()))
-        : facility_ids;
-      facilityIdList = facilityIdList.filter(Boolean).map(Number);
-    } catch {
-      return res.status(400).json({ success: false, message: 'Format facility_ids tidak valid' });
-    }
-  }
-
-  const files = req.files || [];
-
-  const vehicle = await withTransaction(async (client) => {
-    const { rows } = await client.query(
-      `INSERT INTO vehicles(
-         vendor_id, seat_layout_id, name, class_name, vehicle_type, plate_number,
-         brand, model, year, seat_arrangement, capacity
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING *`,
+  const result = await withTransaction(async (client) => {
+    // 1. Insert vehicle
+    const r = await client.query(
+      `INSERT INTO vehicles
+         (vendor_id, seat_layout_id, name, class_name, vehicle_type,
+          plate_number, brand, model, year, seat_arrangement,
+          capacity, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
-        req.vendorId, seat_layout_id, name, class_name, vehicle_type,
-        plate_number || null, brand || null, model || null, year || null,
-        seat_arrangement || null, capacity,
+        vendorId, Number(seat_layout_id), name, class_name, vehicle_type,
+        plate_number || null, brand || null, model || null,
+        year ? Number(year) : null, seat_arrangement || null,
+        Number(capacity), is_active === '0' || is_active === 0 ? 0 : 1,
       ]
     );
-    const v = rows[0];
+    const vehicleId = r.insertId;
 
-    if (facilityIdList.length) {
-      const values = facilityIdList.map((_, idx) => `($1, $${idx + 2})`).join(',');
+    // 2. Facilities
+    for (const fid of facilityIds) {
+      if (!fid) continue;
       await client.query(
-        `INSERT INTO vehicle_facilities(vehicle_id, facility_id) VALUES ${values}`,
-        [v.id, ...facilityIdList]
+        `INSERT INTO vehicle_facilities (vehicle_id, facility_id) VALUES (?, ?)`,
+        [vehicleId, Number(fid)]
       );
     }
 
-    if (files.length) {
-      for (let idx = 0; idx < files.length; idx++) {
-        const f = files[idx];
-        const kind = (req.body.photo_kinds && req.body.photo_kinds[idx]) || 'exterior';
-        await client.query(
-          `INSERT INTO vehicle_photos(vehicle_id, url, kind, is_cover, sort_order)
-           VALUES ($1,$2,$3,$4,$5)`,
-          [v.id, toPublicUrl(req, f.filename), kind, idx === 0, idx]
-        );
-      }
+    // 3. Photos
+    const files = req.files || [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const url = toPublicUrl(req, file.filename, 'vehicles');
+      const isCover = i === 0 ? 1 : 0;
+
+      await client.query(
+        `INSERT INTO vehicle_photos (vehicle_id, url, kind, is_cover, sort_order)
+         VALUES (?, ?, 'exterior', ?, ?)`,
+        [vehicleId, url, isCover, i]
+      );
     }
 
-    return v;
+    // 4. Ambil vehicle
+    const v = await client.query(`SELECT * FROM vehicles WHERE id = ?`, [vehicleId]);
+    return v.rows[0];
   });
 
-  const full = await getVehicleFullById(vehicle.id);
-  created(res, full);
+  // Ambil detail lengkap (termasuk photos)
+  const fullVehicle = await getVehicleFullById(result.id);
+  created(res, fullVehicle);
 });
-
 /** Helper: ambil detail lengkap 1 armada (dipakai create & detail endpoint) */
-async function getVehicleFullById(id) {
-  const { rows: vRows } = await query(
-    `SELECT v.*, sl.name AS seat_layout_name, sl.total_seats, sl.grid_rows, sl.grid_cols
-     FROM vehicles v JOIN seat_layouts sl ON sl.id = v.seat_layout_id
-     WHERE v.id = $1`,
-    [id]
+async function getVehicleFullById(vehicleId) {
+  const { rows: vehicles } = await query(
+    `SELECT v.*, vd.name AS vendor_name
+       FROM vehicles v
+       JOIN vendors vd ON vd.id = v.vendor_id
+      WHERE v.id = ? LIMIT 1`,
+    [vehicleId]
   );
-  if (!vRows.length) return null;
-  const vehicle = vRows[0];
+  if (!vehicles.length) return null;
+  const vehicle = vehicles[0];
 
-  const { rows: facilities } = await query(
-    `SELECT f.id, f.code, f.name, f.icon FROM vehicle_facilities vf
-     JOIN facilities f ON f.id = vf.facility_id WHERE vf.vehicle_id = $1`,
-    [id]
-  );
+  // Photos
   const { rows: photos } = await query(
-    `SELECT id, url, kind, is_cover, sort_order FROM vehicle_photos
-     WHERE vehicle_id = $1 ORDER BY sort_order`,
-    [id]
+    `SELECT id, url, kind, is_cover, sort_order
+       FROM vehicle_photos
+      WHERE vehicle_id = ?
+      ORDER BY is_cover DESC, sort_order, id`,
+    [vehicleId]
   );
-  const { rows: cells } = await query(
-    `SELECT row_no, col_no, cell_type, seat_number FROM seat_layout_cells
-     WHERE layout_id = $1 ORDER BY row_no, col_no`,
+  vehicle.photos = photos;
+  vehicle.cover_photo = photos.find(p => p.is_cover)?.url || photos[0]?.url || null;
+
+  // Facilities
+  const { rows: facilities } = await query(
+    `SELECT f.id, f.code, f.name, f.icon
+       FROM vehicle_facilities vf
+       JOIN facilities f ON f.id = vf.facility_id
+      WHERE vf.vehicle_id = ?`,
+    [vehicleId]
+  );
+  vehicle.facilities = facilities;
+  vehicle.facility_ids = facilities.map(f => f.id);
+
+  // Seat layout
+  const { rows: layout } = await query(
+    `SELECT id, name, total_seats, grid_rows, grid_cols
+       FROM seat_layouts WHERE id = ? LIMIT 1`,
     [vehicle.seat_layout_id]
   );
+  vehicle.seat_layout = layout[0] || null;
 
-  return { ...vehicle, facilities, photos, seat_map: cells };
+  return vehicle;
 }
-
 /** Daftar armada milik vendor (dengan filter & pagination) */
 const listMyVehicles = asyncHandler(async (req, res) => {
-  const { page, limit, offset } = getPagination(req);
-  const { vehicle_type, is_active, q } = req.query;
-
-  const conds = ['v.vendor_id = $1'];
-  const params = [req.vendorId];
-  let i = 2;
-
-  if (vehicle_type) { conds.push(`v.vehicle_type = $${i++}`); params.push(vehicle_type); }
-  if (is_active !== undefined) { conds.push(`v.is_active = $${i++}`); params.push(is_active === 'true'); }
-  if (q) { conds.push(`(v.name LIKE $${i} OR v.class_name LIKE $${i} OR v.plate_number LIKE $${i})`); params.push(`%${q}%`); i++; }
-
-  const where = conds.join(' AND ');
-
   const { rows } = await query(
-    `SELECT v.*, sl.name AS seat_layout_name,
-            (SELECT url FROM vehicle_photos WHERE vehicle_id = v.id AND is_cover LIMIT 1) AS cover_photo
-     FROM vehicles v JOIN seat_layouts sl ON sl.id = v.seat_layout_id
-     WHERE ${where} ORDER BY v.created_at DESC LIMIT $${i} OFFSET $${i + 1}`,
-    [...params, limit, offset]
+    `SELECT v.*,
+            (SELECT url FROM vehicle_photos
+              WHERE vehicle_id = v.id AND is_cover = 1
+              LIMIT 1) AS cover_photo,
+            (SELECT COUNT(*) FROM vehicle_photos WHERE vehicle_id = v.id) AS photo_count
+       FROM vehicles v
+      WHERE v.vendor_id = ?
+      ORDER BY v.created_at DESC`,
+    [req.vendorId]
   );
-  const { rows: countRows } = await query(
-    `SELECT COUNT(*) FROM vehicles v WHERE ${where}`, params
-  );
-
-  ok(res, rows, buildMeta(page, limit, countRows[0].count));
+  ok(res, rows);
 });
 
 /** Detail 1 armada milik vendor (lengkap: fasilitas, foto, denah kursi) */
@@ -235,25 +232,86 @@ const getVehicleDetail = asyncHandler(async (req, res) => {
 
 /** Update data armada */
 const updateVehicle = asyncHandler(async (req, res) => {
-  const allowed = ['name', 'class_name', 'vehicle_type', 'plate_number', 'brand', 'model', 'year', 'seat_arrangement', 'capacity', 'is_active'];
+  const vendorId = Number(req.vendorId);
+  const vehicleId = Number(req.params.id);
+
+  // 1. Cek kendaraan milik vendor
+  const { rows: existing } = await query(
+    `SELECT id FROM vehicles WHERE id = ? AND vendor_id = ? LIMIT 1`,
+    [vehicleId, vendorId]
+  );
+  if (!existing.length) {
+    if (req.files) req.files.forEach(f => { try { fs.unlinkSync(f.path); } catch (e) { } });
+    return res.status(404).json({ success: false, message: 'Armada tidak ditemukan' });
+  }
+
+  // 2. Susun SET clause
+  const allowed = [
+    'name', 'class_name', 'vehicle_type', 'plate_number',
+    'brand', 'model', 'year', 'seat_arrangement', 'capacity',
+    'seat_layout_id', 'is_active'
+  ];
+
   const sets = [];
   const values = [];
-  let i = 1;
+
   for (const key of allowed) {
-    if (req.body[key] !== undefined) {
-      sets.push(`${key} = $${i++}`);
-      values.push(req.body[key]);
+    if (req.body[key] !== undefined && req.body[key] !== '') {
+      let v = req.body[key];
+      if (['capacity', 'year', 'seat_layout_id'].includes(key)) v = Number(v);
+      if (key === 'is_active') v = (v === '0' || v === 0 || v === 'false') ? 0 : 1;
+
+      sets.push(`${key} = ?`);
+      values.push(v);
     }
   }
-  if (!sets.length) return res.status(400).json({ success: false, message: 'Tidak ada field untuk diupdate' });
 
-  values.push(req.params.id, req.vendorId);
-  const { rows } = await query(
-    `UPDATE vehicles SET ${sets.join(', ')} WHERE id = $${i} AND vendor_id = $${i + 1} RETURNING *`,
-    values
-  );
-  if (!rows.length) return res.status(404).json({ success: false, message: 'Armada tidak ditemukan' });
-  ok(res, rows[0]);
+  if (sets.length) {
+    values.push(vehicleId);
+    await query(
+      `UPDATE vehicles SET ${sets.join(', ')}, updated_at = NOW() WHERE id = ?`,
+      values
+    );
+  }
+
+  // 3. Facilities (kalau dikirim, replace semua)
+  const rawFac = req.body['facility_ids[]'] ?? req.body.facility_ids;
+  if (rawFac !== undefined) {
+    const ids = Array.isArray(rawFac) ? rawFac : [rawFac];
+    await query(`DELETE FROM vehicle_facilities WHERE vehicle_id = ?`, [vehicleId]);
+    for (const fid of ids) {
+      if (!fid) continue;
+      await query(
+        `INSERT INTO vehicle_facilities (vehicle_id, facility_id) VALUES (?, ?)`,
+        [vehicleId, Number(fid)]
+      );
+    }
+  }
+
+  // 4. Foto baru (append)
+  if (req.files && req.files.length) {
+    const { rows: coverRows } = await query(
+      `SELECT id FROM vehicle_photos WHERE vehicle_id = ? AND is_cover = 1 LIMIT 1`,
+      [vehicleId]
+    );
+    const hasCover = coverRows.length > 0;
+
+    for (let i = 0; i < req.files.length; i++) {
+      const file = req.files[i];
+      const url = toPublicUrl(req, file.filename, 'vehicles');
+      const isCover = (!hasCover && i === 0) ? 1 : 0;
+
+      await query(
+        `INSERT INTO vehicle_photos (vehicle_id, url, kind, is_cover, sort_order)
+         VALUES (?, ?, 'exterior', ?, ?)`,
+        [vehicleId, url, isCover, i]
+      );
+    }
+  }
+
+  // 5. Ambil detail lengkap
+  const fullVehicle = await getVehicleFullById(vehicleId);
+  ok(res, fullVehicle);
 });
 
 /** Ganti fasilitas armada (replace all) */
@@ -280,61 +338,125 @@ const setVehicleFacilities = asyncHandler(async (req, res) => {
 
 /** Tambah foto ke armada yang sudah ada */
 const addVehiclePhotos = asyncHandler(async (req, res) => {
-  const { rows: check } = await query(`SELECT id FROM vehicles WHERE id = $1 AND vendor_id = $2`, [req.params.id, req.vendorId]);
-  if (!check.length) return res.status(404).json({ success: false, message: 'Armada tidak ditemukan' });
+  const vendorId = Number(req.vendorId);
+  const vehicleId = Number(req.params.id);
 
-  const files = req.files || [];
-  if (!files.length) return res.status(400).json({ success: false, message: 'Tidak ada file diupload' });
+  // Cek ownership
+  const { rows: existing } = await query(
+    `SELECT id FROM vehicles WHERE id = ? AND vendor_id = ? LIMIT 1`,
+    [vehicleId, vendorId]
+  );
+  if (!existing.length) {
+    if (req.files) req.files.forEach(f => { try { fs.unlinkSync(f.path); } catch (e) { } });
+    return res.status(404).json({ success: false, message: 'Armada tidak ditemukan' });
+  }
 
-  const { rows: existingCount } = await query(`SELECT COUNT(*) FROM vehicle_photos WHERE vehicle_id = $1`, [req.params.id]);
-  const hasCover = Number(existingCount[0].count) > 0;
+  if (!req.files || !req.files.length) {
+    return res.status(400).json({ success: false, message: 'Tidak ada file yang di-upload' });
+  }
 
-  const inserted = await withTransaction(async (client) => {
-    const out = [];
-    for (let idx = 0; idx < files.length; idx++) {
-      const f = files[idx];
-      const kind = (req.body.photo_kinds && req.body.photo_kinds[idx]) || 'exterior';
-      const { rows } = await client.query(
-        `INSERT INTO vehicle_photos(vehicle_id, url, kind, is_cover, sort_order)
-         VALUES ($1,$2,$3,$4,
-           COALESCE((SELECT MAX(sort_order)+1 FROM vehicle_photos WHERE vehicle_id = $1), 0))
-         RETURNING *`,
-        [req.params.id, toPublicUrl(req, f.filename), kind, !hasCover && idx === 0]
-      );
-      out.push(rows[0]);
-    }
-    return out;
-  });
-  created(res, inserted);
+  // Cek cover
+  const { rows: coverRows } = await query(
+    `SELECT id FROM vehicle_photos WHERE vehicle_id = ? AND is_cover = 1 LIMIT 1`,
+    [vehicleId]
+  );
+  const hasCover = coverRows.length > 0;
+
+  // Sort order terakhir
+  const { rows: maxRows } = await query(
+    `SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM vehicle_photos WHERE vehicle_id = ?`,
+    [vehicleId]
+  );
+  let sortStart = maxRows[0].max_sort + 1;
+
+  const inserted = [];
+  for (let i = 0; i < req.files.length; i++) {
+    const file = req.files[i];
+    const url = toPublicUrl(req, file.filename, 'vehicles');
+    const isCover = (!hasCover && i === 0) ? 1 : 0;
+
+    const r = await query(
+      `INSERT INTO vehicle_photos (vehicle_id, url, kind, is_cover, sort_order)
+       VALUES (?, ?, 'exterior', ?, ?)`,
+      [vehicleId, url, isCover, sortStart + i]
+    );
+    inserted.push(r.insertId);
+  }
+
+  const fullVehicle = await getVehicleFullById(vehicleId);
+  created(res, fullVehicle);
 });
 
 /** Hapus foto armada */
 const deleteVehiclePhoto = asyncHandler(async (req, res) => {
+  const vendorId = Number(req.vendorId);
+  const vehicleId = Number(req.params.id);
+  const photoId = Number(req.params.photoId);
+
+  // Cek ownership + dapatkan URL
   const { rows } = await query(
-    `DELETE FROM vehicle_photos vp USING vehicles v
-     WHERE vp.id = $1 AND vp.vehicle_id = v.id AND v.vendor_id = $2
-     RETURNING vp.id`,
-    [req.params.photoId, req.vendorId]
+    `SELECT vp.id, vp.url, vp.is_cover FROM vehicle_photos vp
+       JOIN vehicles v ON v.id = vp.vehicle_id
+      WHERE vp.id = ? AND vp.vehicle_id = ? AND v.vendor_id = ? LIMIT 1`,
+    [photoId, vehicleId, vendorId]
   );
-  if (!rows.length) return res.status(404).json({ success: false, message: 'Foto tidak ditemukan' });
-  ok(res, { deleted: true });
+  if (!rows.length) {
+    return res.status(404).json({ success: false, message: 'Foto tidak ditemukan' });
+  }
+
+  const photo = rows[0];
+
+  // Hapus file fisik (opsional)
+  try {
+    const filename = photo.url.split('/').pop();
+    const filePath = path.join(process.cwd(), UPLOAD_DIR, 'vehicles', filename);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch (e) {
+    console.warn('[deleteVehiclePhoto] file tidak ada:', e.message);
+  }
+
+  // Hapus row
+  await query(`DELETE FROM vehicle_photos WHERE id = ?`, [photoId]);
+
+  // Kalau yang dihapus adalah cover, jadikan foto pertama sebagai cover
+  if (photo.is_cover) {
+    const { rows: first } = await query(
+      `SELECT id FROM vehicle_photos WHERE vehicle_id = ? ORDER BY sort_order, id LIMIT 1`,
+      [vehicleId]
+    );
+    if (first.length) {
+      await query(`UPDATE vehicle_photos SET is_cover = 1 WHERE id = ?`, [first[0].id]);
+    }
+  }
+
+  const fullVehicle = await getVehicleFullById(vehicleId);
+  ok(res, fullVehicle);
 });
 
 /** Set foto sampul (cover) */
 const setCoverPhoto = asyncHandler(async (req, res) => {
-  await withTransaction(async (client) => {
-    const { rows: check } = await client.query(
-      `SELECT vp.id FROM vehicle_photos vp JOIN vehicles v ON v.id = vp.vehicle_id
-       WHERE vp.id = $1 AND v.vendor_id = $2 AND vp.vehicle_id = $3`,
-      [req.params.photoId, req.vendorId, req.params.id]
-    );
-    if (!check.length) throw Object.assign(new Error('Foto tidak ditemukan'), { status: 404 });
+  const vendorId = Number(req.vendorId);
+  const vehicleId = Number(req.params.id);
+  const photoId = Number(req.params.photoId);
 
-    await client.query(`UPDATE vehicle_photos SET is_cover = FALSE WHERE vehicle_id = $1`, [req.params.id]);
-    await client.query(`UPDATE vehicle_photos SET is_cover = TRUE WHERE id = $1`, [req.params.photoId]);
-  });
-  const full = await getVehicleFullById(req.params.id);
-  ok(res, full);
+  // Cek ownership
+  const { rows } = await query(
+    `SELECT vp.id FROM vehicle_photos vp
+       JOIN vehicles v ON v.id = vp.vehicle_id
+      WHERE vp.id = ? AND vp.vehicle_id = ? AND v.vendor_id = ? LIMIT 1`,
+    [photoId, vehicleId, vendorId]
+  );
+  if (!rows.length) {
+    return res.status(404).json({ success: false, message: 'Foto tidak ditemukan' });
+  }
+
+  // Reset semua cover → 0
+  await query(`UPDATE vehicle_photos SET is_cover = 0 WHERE vehicle_id = ?`, [vehicleId]);
+  // Set yang baru
+  await query(`UPDATE vehicle_photos SET is_cover = 1 WHERE id = ?`, [photoId]);
+
+  const fullVehicle = await getVehicleFullById(vehicleId);
+  ok(res, fullVehicle);
 });
 
 /** Hapus armada (soft: nonaktifkan agar histori jadwal tetap valid) */
@@ -348,9 +470,18 @@ const deactivateVehicle = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  createSeatLayout, listSeatLayouts, getSeatLayoutDetail,
+  createVehicle,
+  listMyVehicles,
+  getVehicleDetail,
+  getVehicleFullById,
+  updateVehicle,
+  setVehicleFacilities,
+  addVehiclePhotos,
+  setCoverPhoto,
+  deleteVehiclePhoto,
+  deactivateVehicle,
   listFacilities,
-  createVehicle, listMyVehicles, getVehicleDetail, updateVehicle,
-  setVehicleFacilities, addVehiclePhotos, deleteVehiclePhoto, setCoverPhoto,
-  deactivateVehicle, getVehicleFullById,
+  createSeatLayout,
+  listSeatLayouts,
+  getSeatLayoutDetail,
 };

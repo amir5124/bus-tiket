@@ -50,9 +50,11 @@ router.post(
 );
 router.get('/:vendorId/vehicles', requireVendorMember('staff'), vehicleCtrl.listMyVehicles);
 router.get('/:vendorId/vehicles/:id', requireVendorMember('staff'), vehicleCtrl.getVehicleDetail);
-router.patch('/:vendorId/vehicles/:id',
+router.patch(
+  '/:vendorId/vehicles/:id',
   requireVendorMember('manager'),
   requireActiveVendor(),
+  uploadVehiclePhotos.array('photos', 10),   // ← TAMBAHKAN INI
   vehicleCtrl.updateVehicle
 );
 router.put('/:vendorId/vehicles/:id/facilities',
@@ -95,6 +97,11 @@ router.post('/:vendorId/routes',
   requireVendorMember('manager'),
   requireActiveVendor(),
   vendorRouteCtrl.createVendorRoute
+);
+router.put('/:vendorId/routes/:id',
+  requireVendorMember('manager'),
+  requireActiveVendor(),
+  vendorRouteCtrl.updateVendorRoute   // ← fungsi baru di controller
 );
 router.delete('/:vendorId/routes/:id',
   requireVendorMember('manager'),
