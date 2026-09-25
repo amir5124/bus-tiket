@@ -76,9 +76,90 @@ const registerVendor = asyncHandler(async (req, res) => {
 });
 
 const getMyVendorProfile = asyncHandler(async (req, res) => {
-  const { rows } = await query(`SELECT * FROM v_vendor_profile WHERE vendor_id=?`, [req.vendorId]);
-  if (!rows.length) return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
-  ok(res, rows[0]);
+  const vendorId = Number(req.vendorId);
+
+  // 1. Ambil data vendor + owner lengkap
+  const { rows } = await query(
+    `SELECT 
+        v.id                AS vendor_id,
+        v.code,
+        v.name,
+        v.legal_name,
+        v.npwp,
+        v.nib,
+        v.contact_phone,
+        v.contact_email,
+        v.address,
+        v.logo_url,
+        v.description,
+        v.status,
+        v.commission_percent,
+        v.rating_avg,
+        v.rating_count,
+        v.verified_at,
+        v.rejected_reason,
+        v.created_at,
+        v.updated_at,
+        u.jagel_user_id,
+        u.username,
+        u.full_name         AS owner_name,
+        u.phone             AS owner_phone,
+        u.email             AS owner_email
+       FROM vendors v
+       JOIN app_users u ON u.id = v.owner_user_id
+      WHERE v.id = ?
+      LIMIT 1`,
+    [vendorId]
+  );
+  if (!rows.length) {
+    return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  }
+  const vendor = rows[0];
+
+  // 2. Bank accounts
+  const { rows: banks } = await query(
+    `SELECT id, bank_name, account_number, account_holder, is_primary, created_at
+       FROM vendor_bank_accounts
+      WHERE vendor_id = ?
+      ORDER BY is_primary DESC, id`,
+    [vendorId]
+  );
+
+  // 3. Members
+  const { rows: members } = await query(
+    `SELECT vm.role, vm.notify_enabled,
+            u.username, u.full_name, u.phone, u.email
+       FROM vendor_members vm
+       JOIN app_users u ON u.id = vm.user_id
+      WHERE vm.vendor_id = ?
+      ORDER BY vm.role DESC`,
+    [vendorId]
+  );
+
+  // 4. Stats ringkas
+  const { rows: stats } = await query(
+    `SELECT 
+        (SELECT COUNT(*) FROM vehicles WHERE vendor_id = ?)   AS total_vehicles,
+        (SELECT COUNT(*) FROM routes WHERE vendor_id = ?)     AS total_routes,
+        (SELECT COUNT(*) FROM schedules WHERE vendor_id = ?)  AS total_schedules,
+        (SELECT COUNT(*) FROM schedules WHERE vendor_id = ? AND status = 'published') AS published_schedules`,
+    [vendorId, vendorId, vendorId, vendorId]
+  );
+
+  res.json({
+    success: true,
+    data: {
+      ...vendor,
+      bank_accounts: banks,
+      members: members,
+      stats: stats[0] || {
+        total_vehicles: 0,
+        total_routes: 0,
+        total_schedules: 0,
+        published_schedules: 0,
+      },
+    },
+  });
 });
 
 const updateVendorProfile = asyncHandler(async (req, res) => {
