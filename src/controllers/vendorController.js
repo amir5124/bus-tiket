@@ -324,8 +324,7 @@ const requestTopup = asyncHandler(async (req, res) => {
       customer_phone: customer_id, partner_reff,
       username: linkqu.username, pin: linkqu.pin,
       expired, signature,
-      url_callback: process.env.LINKQU_TOPUP_CALLBACK_URL
-        || `${process.env.BASE_URL}/api/vendors/topup/callback`,
+      url_callback: 'https://bus.siappgo.id/api/vendors/topup/callback',
     };
   } else {
     signature = signQRIS({
@@ -338,8 +337,7 @@ const requestTopup = asyncHandler(async (req, res) => {
       customer_phone: customer_id, partner_reff,
       username: linkqu.username, pin: linkqu.pin,
       expired, signature,
-      url_callback: process.env.LINKQU_TOPUP_CALLBACK_URL
-        || `${process.env.BASE_URL}/api/vendors/topup/callback`,
+      url_callback: 'https://bus.siappgo.id/api/vendors/topup/callback',
     };
   }
 
