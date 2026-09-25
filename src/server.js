@@ -4,13 +4,26 @@
 // =====================================================================
 require('dotenv').config();
 
+// === VALIDASI ENV WAJIB (fail fast) ===
+const REQUIRED_ENV = [
+  'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME',
+  'JWT_SECRET',
+  'LINKQU_CLIENT_ID', 'LINKQU_CLIENT_SECRET',
+  'LINKQU_USERNAME', 'LINKQU_PIN', 'LINKQU_SERVER_KEY',
+];
+const missing = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missing.length) {
+  console.error('❌ [Server] ENV berikut belum diset:', missing.join(', '));
+  console.error('   Pastikan file .env ada dan ter-load (Docker: pakai env_file / --env-file).');
+  process.exit(1);
+}
+console.log('✅ [Server] Semua ENV wajib tersedia.');
+
 const app = require('./app');
-const { pool, testConnection } = require('./config/db');
+const { pool, testConnection, query } = require('./config/db'); // ✅ path diperbaiki + query diimport
 const bookingOps = require('./utils/bookingOps');
 
 const PORT = process.env.PORT || 4000;
-
-// Interval job expiry (ms). Bisa diatur via .env
 const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
 
 (async () => {
@@ -33,7 +46,7 @@ const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
   });
 
   // -----------------------------------------------------------------
-  // 3. Background job: expire booking pending & lepas kursi yang habis masa tahan
+  // 3. Background job: expire booking pending
   // -----------------------------------------------------------------
   let expiryJob = null;
   if (dbOk) {
@@ -43,36 +56,37 @@ const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
     console.warn('⏱️  [Server] Expiry job TIDAK dijalankan karena database tidak terhubung.');
   }
 
-  // Cron: auto-unpublish topup expired (setiap 30 menit)
-  setInterval(async () => {
+  // -----------------------------------------------------------------
+  // 3b. Cron: auto-unpublish topup expired (setiap 30 menit)
+  //     ✅ Tidak lagi pakai require('./src/config/db') yang salah path
+  // -----------------------------------------------------------------
+  const topupCron = setInterval(async () => {
     try {
-      const { query } = require('./src/config/db');
-
       const { rows: expiredVendors } = await query(
         `SELECT id, name FROM vendors
-        WHERE payment_system = 'topup'
-          AND status = 'active'
-          AND topup_active_until IS NOT NULL
-          AND topup_active_until < NOW()`
+          WHERE payment_system = 'topup'
+            AND status = 'active'
+            AND topup_active_until IS NOT NULL
+            AND topup_active_until < NOW()`
       );
 
       for (const v of expiredVendors) {
         const r = await query(
           `UPDATE schedules SET status = 'unpublished'
-          WHERE vendor_id = ? AND status = 'published'`,
+            WHERE vendor_id = ? AND status = 'published'`,
           [v.id]
         );
 
         if (r.rowCount > 0) {
           await query(
             `INSERT INTO notifications
-             (recipient_user_id, vendor_id, type, channel, title, body, data)
-           SELECT vm.user_id, ?, 'system', 'in_app',
-                  'Topup expired',
-                  'Masa aktif topup habis. Jadwal di-unpublish. Silakan topup ulang.',
-                  JSON_OBJECT('vendor_id', ?)
-             FROM vendor_members vm
-            WHERE vm.vendor_id = ? AND vm.role = 'owner'`,
+               (recipient_user_id, vendor_id, type, channel, title, body, data)
+             SELECT vm.user_id, ?, 'system', 'in_app',
+                    'Topup expired',
+                    'Masa aktif topup habis. Jadwal di-unpublish. Silakan topup ulang.',
+                    JSON_OBJECT('vendor_id', ?)
+               FROM vendor_members vm
+              WHERE vm.vendor_id = ? AND vm.role = 'owner'`,
             [v.id, v.id, v.id]
           );
           console.log(`[TOPUP-CRON] Vendor ${v.id} (${v.name}): ${r.rowCount} jadwal di-unpublish`);
@@ -82,6 +96,8 @@ const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
       console.error('[TOPUP-CRON]', e.message);
     }
   }, 30 * 60 * 1000);
+  topupCron.unref?.(); // biar tidak menahan process saat shutdown
+
   // -----------------------------------------------------------------
   // 4. Graceful shutdown
   // -----------------------------------------------------------------
@@ -93,13 +109,15 @@ const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
 
     console.log(`\n[Server] Menerima ${signal}, mematikan server dengan aman...`);
 
-    // Hentikan job dulu supaya tidak query saat pool ditutup
     if (expiryJob) {
       clearInterval(expiryJob);
       console.log('[Server] Expiry job dihentikan.');
     }
+    if (topupCron) {
+      clearInterval(topupCron);
+      console.log('[Server] Topup cron dihentikan.');
+    }
 
-    // Force exit kalau server.close() menggantung > 10s
     const forceTimer = setTimeout(() => {
       console.error('[Server] Timeout menutup server, paksa keluar.');
       process.exit(1);
@@ -126,7 +144,7 @@ const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   // -----------------------------------------------------------------
-  // 5. Safety net untuk error tak terduga
+  // 5. Safety net
   // -----------------------------------------------------------------
   process.on('unhandledRejection', (reason) => {
     console.error('[Unhandled Rejection]', reason);
@@ -134,7 +152,6 @@ const EXPIRY_JOB_MS = Number(process.env.EXPIRY_JOB_MS || 60_000);
 
   process.on('uncaughtException', (err) => {
     console.error('[Uncaught Exception]', err);
-    // Uncaught exception biasanya bikin state aplikasi tidak jelas — matikan dengan aman
     shutdown('uncaughtException');
   });
 })();
