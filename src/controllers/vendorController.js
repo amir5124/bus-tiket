@@ -8,11 +8,11 @@ const { asyncHandler, ok, created, randomCode } = require('../utils/helpers');
  * LINKQU — untuk topup vendor
  * ===================================================================== */
 const linkqu = {
-  clientId: process.env.LINKQU_CLIENT_ID,
-  clientSecret: process.env.LINKQU_CLIENT_SECRET,
-  username: process.env.LINKQU_USERNAME,
-  pin: process.env.LINKQU_PIN,
-  serverKey: process.env.LINKQU_SERVER_KEY,
+  clientId: process.env.LINKQU_CLIENT_ID || 'testing',
+  clientSecret: process.env.LINKQU_CLIENT_SECRET || '123',
+  username: process.env.LINKQU_USERNAME || 'LI307GXIN',
+  pin: process.env.LINKQU_PIN || '2K2NPCBBNNTovgB',
+  serverKey: process.env.LINKQU_SERVER_KEY || 'LinkQu@2020',
   baseUrl: process.env.LINKQU_BASE_URL || 'https://gateway-dev.linkqu.id/linkqu-partner',
 };
 
