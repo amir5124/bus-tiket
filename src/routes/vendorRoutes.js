@@ -77,6 +77,7 @@ router.put('/:vendorId/routes/:id',
   requireVendorMember('manager'), requireActiveVendor(), vendorRouteCtrl.updateVendorRoute);
 router.delete('/:vendorId/routes/:id',
   requireVendorMember('manager'), requireActiveVendor(), vendorRouteCtrl.deleteVendorRoute);
+router.get('/:vendorId/stops', requireVendorMember('staff'), vendorRouteCtrl.listStops);
 
 /* =====================================================================
  * JADWAL

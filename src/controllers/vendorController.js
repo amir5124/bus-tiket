@@ -546,6 +546,33 @@ const confirmTopupManual = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * GET /api/vendors/:vendorId/stops?city_id=1
+ * List titik naik/turun (stops) untuk satu kota, yang boleh dipakai vendor:
+ * - stops publik (vendor_id IS NULL, milik siapa saja)
+ * - stops privat milik vendor itu sendiri (vendor_id = req.vendorId)
+ */
+const listStops = asyncHandler(async (req, res) => {
+  const vendorId = Number(req.vendorId);
+  const cityId = Number(req.query.city_id);
+
+  if (!cityId) {
+    return res.status(400).json({ success: false, message: 'city_id wajib diisi' });
+  }
+
+  const { rows } = await query(
+    `SELECT id, city_id, vendor_id, name, address, latitude, longitude
+       FROM stops
+      WHERE city_id = ?
+        AND is_active = 1
+        AND (vendor_id IS NULL OR vendor_id = ?)
+      ORDER BY vendor_id IS NULL DESC, name`,
+    [cityId, vendorId]
+  );
+
+  ok(res, rows);
+});
+
 module.exports = {
   registerVendor,
   getMyVendorProfile,
@@ -556,4 +583,5 @@ module.exports = {
   topupCallback,
   listTopups,
   confirmTopupManual,
+  listStops
 };
