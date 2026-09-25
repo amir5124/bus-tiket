@@ -66,6 +66,7 @@ router.delete('/:vendorId/vehicles/:id/photos/:photoId',
   requireVendorMember('manager'), requireActiveVendor(), vehicleCtrl.deleteVehiclePhoto);
 router.delete('/:vendorId/vehicles/:id',
   requireVendorMember('owner'), requireActiveVendor(), vehicleCtrl.deactivateVehicle);
+router.get('/:vendorId/stops', requireVendorMember('staff'), vendorCtrl.listStops);
 
 /* =====================================================================
  * RUTE
@@ -77,7 +78,7 @@ router.put('/:vendorId/routes/:id',
   requireVendorMember('manager'), requireActiveVendor(), vendorRouteCtrl.updateVendorRoute);
 router.delete('/:vendorId/routes/:id',
   requireVendorMember('manager'), requireActiveVendor(), vendorRouteCtrl.deleteVendorRoute);
-router.get('/:vendorId/stops', requireVendorMember('staff'), vendorRouteCtrl.listStops);
+
 
 /* =====================================================================
  * JADWAL
