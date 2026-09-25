@@ -26,6 +26,8 @@ const PAID = ['SUCCESS', 'SETTLED', 'PAID'];
 // =====================================================================
 const JAGEL_BASE_URL = process.env.JAGEL_BASE_URL || 'https://api.jagel.id/v1';
 const JAGEL_API_KEY = process.env.JAGEL_API_KEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO';
+const LINKU_JAGEL_USERNAME = process.env.LINKU_JAGEL_USERNAME || 'amir';
+
 
 // =====================================================================
 // SIGNATURE — contek dari backend topup yang WORK
@@ -712,19 +714,20 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
   return { booking_code, paid: true };
 }
 
-// =====================================================================
-// markPaid — idempoten + kirim invoice + notif vendor & customer
-// (untuk VA/QRIS via callback LinkQu)
-// =====================================================================
 const markPaid = async (partner_reff) => {
   const { rows } = await query(
     `SELECT p.booking_id, p.amount, p.status AS payment_status,
-            b.status AS booking_status, b.total_amount, b.ticket_subtotal,
-            b.vendor_id,
-            v.payment_system, v.commission_percent, v.markup_percent
+            b.status AS booking_status, b.booking_code, b.order_no,
+            b.total_amount, b.ticket_subtotal, b.vendor_id,
+            v.name AS vendor_name, v.contact_email AS vendor_email, v.contact_phone AS vendor_phone,
+            v.payment_system, v.commission_percent, v.markup_percent,
+            u.username AS vendor_owner_username,
+            pm.name AS method_name
        FROM payments p
        JOIN bookings b ON b.id = p.booking_id
        JOIN vendors v ON v.id = b.vendor_id
+       JOIN app_users u ON u.id = v.owner_user_id
+       LEFT JOIN payment_methods pm ON pm.id = p.method_id
       WHERE p.gateway_ref = ?
       LIMIT 1`,
     [partner_reff]
@@ -754,19 +757,14 @@ const markPaid = async (partner_reff) => {
   let commissionAmount = 0;
 
   if (p.payment_system === 'commission') {
-    // Platform ambil % dari tiket
     commissionAmount = Math.round(ticketSubtotal * Number(p.commission_percent) / 100);
     platformAmount = commissionAmount;
     vendorAmount = totalAmount - platformAmount;
-
   } else if (p.payment_system === 'markup') {
-    // Platform ambil selisih markup
     markupAmount = Math.round(ticketSubtotal * Number(p.markup_percent) / 100);
     platformAmount = markupAmount;
     vendorAmount = totalAmount - markupAmount;
-
   } else if (p.payment_system === 'topup') {
-    // Semua ke vendor (topup sudah dibayar di muka)
     platformAmount = 0;
     vendorAmount = totalAmount;
   }
@@ -801,15 +799,68 @@ const markPaid = async (partner_reff) => {
             vendor_amount = ?,
             markup_amount = ?
       WHERE id = ? AND status = 'pending_payment'`,
-    [
-      p.payment_system,
-      commissionAmount,
-      platformAmount,
-      vendorAmount,
-      markupAmount,
-      p.booking_id,
-    ]
+    [p.payment_system, commissionAmount, platformAmount, vendorAmount, markupAmount, p.booking_id]
   );
+
+  // ========== ADJUST SALDO JAGEL SESUAI SISTEM ==========
+  if (p.payment_system === 'topup') {
+    // Dana penuh langsung masuk ke Jagel milik VENDOR, tanpa potongan
+    if (p.vendor_owner_username) {
+      try {
+        await adjustJagelSaldo(
+          p.vendor_owner_username,
+          totalAmount,
+          `Penjualan tiket booking ${p.booking_code} (${partner_reff}) — sistem topup, tanpa potongan`
+        );
+        console.log(`[markPaid] ✅ Rp ${totalAmount} masuk Jagel vendor @${p.vendor_owner_username}`);
+      } catch (e) {
+        console.error(`[markPaid] ❌ gagal kredit Jagel vendor @${p.vendor_owner_username}:`, e.message);
+        // booking tetap paid; butuh rekonsiliasi manual kalau gagal
+      }
+    } else {
+      console.error('[markPaid] ❌ vendor tidak punya username Jagel, tidak bisa adjust saldo');
+    }
+  } else if (p.payment_system === 'commission' || p.payment_system === 'markup') {
+    // Dana DITAMPUNG (escrow) di Jagel akun LinkU (amir) dulu, menunggu payout ke vendor
+    try {
+      await adjustJagelSaldo(
+        LINKU_JAGEL_USERNAME,
+        totalAmount,
+        `Escrow booking ${p.booking_code} (${partner_reff}) — sistem ${p.payment_system}, ` +
+        `dipotong ${platformAmount}, hak vendor ${vendorAmount}`
+      );
+      console.log(`[markPaid] ✅ Rp ${totalAmount} masuk escrow Jagel @${LINKU_JAGEL_USERNAME}`);
+    } catch (e) {
+      console.error(`[markPaid] ❌ gagal kredit Jagel escrow @${LINKU_JAGEL_USERNAME}:`, e.message);
+    }
+  }
+
+  // ========== NOTIFIKASI VENDOR (rincian lengkap) ==========
+  try {
+    await notifyVendor({
+      vendor_id: p.vendor_id,
+      vendor_name: p.vendor_name,
+      vendor_email: p.vendor_email,
+      vendor_phone: p.vendor_phone,
+      type: 'payment_paid',
+      title: `Pembayaran diterima — ${p.booking_code}`,
+      body: `Pembayaran booking ${p.booking_code} berhasil diterima customer.`,
+      data: {
+        booking_code: p.booking_code,
+        order_no: p.order_no,
+        total_amount: totalAmount,
+        payment_system: p.payment_system,
+        commission_amount: commissionAmount,
+        markup_amount: markupAmount,
+        platform_amount: platformAmount,
+        vendor_amount: vendorAmount,
+        method: p.method_name || null,
+      },
+    });
+    console.log('[markPaid] ✅ notif vendor terkirim');
+  } catch (e) {
+    console.error('[markPaid] ❌ notif vendor gagal:', e.message);
+  }
 
   // Invoice email
   sendInvoiceEmail(p.booking_id).catch(err =>
@@ -818,7 +869,6 @@ const markPaid = async (partner_reff) => {
 
   return p.booking_id;
 };
-
 // =====================================================================
 // POST /api/payments/callback
 // =====================================================================

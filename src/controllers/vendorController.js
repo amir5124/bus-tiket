@@ -3,6 +3,7 @@ const moment = require('moment-timezone');
 const crypto = require('crypto');
 const { query, withTransaction } = require('../config/db');
 const { asyncHandler, ok, created, randomCode } = require('../utils/helpers');
+const { notifyVendor } = require('../utils/notifyVendor');
 
 /* =====================================================================
  * LINKQU — untuk topup vendor
@@ -420,9 +421,11 @@ const topupCallback = asyncHandler(async (req, res) => {
   }
 
   const { rows: topups } = await query(
-    `SELECT id, vendor_id, amount, period_end, status
-       FROM vendor_topups
-      WHERE payment_reff = ? LIMIT 1`,
+    `SELECT t.id, t.vendor_id, t.amount, t.period_start, t.period_end, t.status,
+            v.name AS vendor_name, v.contact_email AS vendor_email, v.contact_phone AS vendor_phone
+       FROM vendor_topups t
+       JOIN vendors v ON v.id = t.vendor_id
+      WHERE t.payment_reff = ? LIMIT 1`,
     [partner_reff]
   );
   if (!topups.length) {
@@ -449,26 +452,30 @@ const topupCallback = asyncHandler(async (req, res) => {
 
   console.log(`[TOPUP-CALLBACK] ✅ Vendor ${topup.vendor_id} aktif s/d ${topup.period_end}`);
 
-  // Notif vendor
   try {
-    await query(
-      `INSERT INTO notifications 
-         (recipient_user_id, vendor_id, type, channel, title, body, data)
-       SELECT vm.user_id, ?, 'system', 'in_app',
-              'Topup berhasil',
-              CONCAT('Topup Rp ', ?, ' berhasil. Vendor aktif sampai ', ?),
-              JSON_OBJECT('vendor_id', ?, 'period_end', ?)
-         FROM vendor_members vm
-        WHERE vm.vendor_id = ? AND vm.role = 'owner'`,
-      [topup.vendor_id, TOPUP_AMOUNT, topup.period_end, topup.vendor_id, topup.period_end, topup.vendor_id]
-    );
+    await notifyVendor({
+      vendor_id: topup.vendor_id,
+      vendor_name: topup.vendor_name,
+      vendor_email: topup.vendor_email,
+      vendor_phone: topup.vendor_phone,
+      type: 'topup_paid',
+      title: 'Topup berhasil — akun berjualan aktif',
+      body: `Pembayaran topup langganan berhasil. Vendor aktif berjualan sampai periode berikutnya.`,
+      data: {
+        vendor_id: topup.vendor_id,
+        amount: topup.amount,
+        period_start: topup.period_start,
+        period_end: topup.period_end,
+        partner_reff,
+      },
+    });
+    console.log('[TOPUP-CALLBACK] ✅ notif vendor terkirim');
   } catch (e) {
     console.warn('[TOPUP-CALLBACK] notif gagal:', e.message);
   }
 
   res.json({ message: 'OK' });
 });
-
 /**
  * GET /api/vendors/:vendorId/topup/history
  */
@@ -484,16 +491,15 @@ const listTopups = asyncHandler(async (req, res) => {
   ok(res, rows);
 });
 
-/**
- * POST /api/vendors/:vendorId/topup/:topupId/confirm
- * Manual confirm (dev/test)
- */
 const confirmTopupManual = asyncHandler(async (req, res) => {
   const topupId = Number(req.params.topupId);
   const vendorId = Number(req.vendorId);
 
   const { rows: topups } = await query(
-    `SELECT * FROM vendor_topups WHERE id = ? AND vendor_id = ? LIMIT 1`,
+    `SELECT t.*, v.name AS vendor_name, v.contact_email AS vendor_email, v.contact_phone AS vendor_phone
+       FROM vendor_topups t
+       JOIN vendors v ON v.id = t.vendor_id
+      WHERE t.id = ? AND t.vendor_id = ? LIMIT 1`,
     [topupId, vendorId]
   );
   if (!topups.length) {
@@ -512,6 +518,26 @@ const confirmTopupManual = asyncHandler(async (req, res) => {
       [topup.period_end, vendorId]
     );
   });
+
+  try {
+    await notifyVendor({
+      vendor_id: vendorId,
+      vendor_name: topup.vendor_name,
+      vendor_email: topup.vendor_email,
+      vendor_phone: topup.vendor_phone,
+      type: 'topup_paid',
+      title: 'Topup berhasil — akun berjualan aktif',
+      body: `Topup dikonfirmasi manual. Vendor aktif berjualan sampai periode berikutnya.`,
+      data: {
+        vendor_id: vendorId,
+        amount: topup.amount,
+        period_start: topup.period_start,
+        period_end: topup.period_end,
+      },
+    });
+  } catch (e) {
+    console.warn('[TOPUP-CONFIRM-MANUAL] notif gagal:', e.message);
+  }
 
   res.json({
     success: true,
