@@ -155,12 +155,15 @@ async function resolveSeatLayoutId(vendorId, seatLayoutId) {
         }
       }
 
+      // ✅ FIX: MySQL tidak support "VALUES ?" — pakai placeholder manual
       if (cells.length) {
+        const placeholders = cells.map(() => '(?, ?, ?, ?, ?)').join(', ');
+        const flat = cells.flat();
         await client.query(
           `INSERT INTO seat_layout_cells
              (layout_id, row_no, col_no, cell_type, seat_number)
-           VALUES ?`,
-          [cells]
+           VALUES ${placeholders}`,
+          flat
         );
       }
 
@@ -185,10 +188,6 @@ async function resolveSeatLayoutId(vendorId, seatLayoutId) {
 
 /**
  * Vendor upload armada baru.
- * body (multipart/form-data):
- *   name, class_name, vehicle_type, plate_number, brand, model, year,
- *   seat_arrangement, capacity, seat_layout_id, facility_ids
- *   files: photos[]
  */
 const createVehicle = asyncHandler(async (req, res) => {
   const vendorId = Number(req.vendorId);
@@ -213,7 +212,7 @@ const createVehicle = asyncHandler(async (req, res) => {
     });
   }
 
-  // Facilities dari FormData (bisa "facility_ids[]" atau "facility_ids")
+  // Facilities dari FormData
   const rawFac = req.body['facility_ids[]'] ?? req.body.facility_ids ?? [];
   const facilityIds = Array.isArray(rawFac) ? rawFac : [rawFac];
 
@@ -353,7 +352,6 @@ const updateVehicle = asyncHandler(async (req, res) => {
   const vendorId = Number(req.vendorId);
   const vehicleId = Number(req.params.id);
 
-  // 1. Cek ownership
   const { rows: existing } = await query(
     `SELECT id FROM vehicles WHERE id = ? AND vendor_id = ? LIMIT 1`,
     [vehicleId, vendorId]
@@ -363,7 +361,7 @@ const updateVehicle = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Armada tidak ditemukan' });
   }
 
-  // 2. Kalau seat_layout_id diubah → resolve ulang
+  // Kalau seat_layout_id diubah → resolve ulang
   let finalLayoutId = null;
   if (req.body.seat_layout_id !== undefined && req.body.seat_layout_id !== '') {
     try {
@@ -374,7 +372,6 @@ const updateVehicle = asyncHandler(async (req, res) => {
     }
   }
 
-  // 3. Susun SET clause
   const allowed = [
     'name', 'class_name', 'vehicle_type', 'plate_number',
     'brand', 'model', 'year', 'seat_arrangement', 'capacity',
@@ -384,7 +381,6 @@ const updateVehicle = asyncHandler(async (req, res) => {
   const sets = [];
   const values = [];
 
-  // seat_layout_id (dari finalLayoutId yang sudah resolved)
   if (finalLayoutId !== null) {
     sets.push('seat_layout_id = ?');
     values.push(finalLayoutId);
@@ -409,7 +405,7 @@ const updateVehicle = asyncHandler(async (req, res) => {
     );
   }
 
-  // 4. Facilities (kalau dikirim, replace semua)
+  // Facilities (kalau dikirim, replace semua)
   const rawFac = req.body['facility_ids[]'] ?? req.body.facility_ids;
   if (rawFac !== undefined) {
     const ids = Array.isArray(rawFac) ? rawFac : [rawFac];
@@ -423,7 +419,7 @@ const updateVehicle = asyncHandler(async (req, res) => {
     }
   }
 
-  // 5. Foto baru (append)
+  // Foto baru (append)
   if (req.files && req.files.length) {
     const { rows: coverRows } = await query(
       `SELECT id FROM vehicle_photos WHERE vehicle_id = ? AND is_cover = 1 LIMIT 1`,
@@ -467,7 +463,8 @@ const setVehicleFacilities = asyncHandler(async (req, res) => {
     await client.query(`DELETE FROM vehicle_facilities WHERE vehicle_id = ?`, [req.params.id]);
 
     if (facility_ids.length) {
-      const placeholders = facility_ids.map(() => '(?, ?)').join(',');
+      // ✅ FIX: placeholder manual
+      const placeholders = facility_ids.map(() => '(?, ?)').join(', ');
       const values = facility_ids.flatMap(fid => [req.params.id, Number(fid)]);
       await client.query(
         `INSERT INTO vehicle_facilities(vehicle_id, facility_id) VALUES ${placeholders}`,
@@ -545,7 +542,6 @@ const deleteVehiclePhoto = asyncHandler(async (req, res) => {
 
   const photo = rows[0];
 
-  // Hapus file fisik
   try {
     const filename = photo.url.split('/').pop();
     const filePath = path.join(process.cwd(), UPLOAD_DIR, 'vehicles', filename);
@@ -556,7 +552,6 @@ const deleteVehiclePhoto = asyncHandler(async (req, res) => {
 
   await query(`DELETE FROM vehicle_photos WHERE id = ?`, [photoId]);
 
-  // Kalau yang dihapus adalah cover, jadikan foto pertama sebagai cover
   if (photo.is_cover) {
     const { rows: first } = await query(
       `SELECT id FROM vehicle_photos WHERE vehicle_id = ? ORDER BY sort_order, id LIMIT 1`,
