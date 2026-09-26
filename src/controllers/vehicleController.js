@@ -103,7 +103,6 @@ const listFacilities = asyncHandler(async (req, res) => {
  * @throws Error dengan `.status` untuk validasi
  */
 async function resolveSeatLayoutId(vendorId, seatLayoutId) {
-  // 1. Cek apakah ini template sistem
   const { rows: tplRows } = await query(
     `SELECT id, name, vehicle_type, total_seats,
             \`rows\` AS row_count, cols, grid
@@ -113,7 +112,6 @@ async function resolveSeatLayoutId(vendorId, seatLayoutId) {
   );
 
   if (tplRows.length) {
-    // === AUTO-COPY dari template ===
     const tpl = tplRows[0];
     let grid = tpl.grid;
     if (typeof grid === 'string') {
@@ -121,22 +119,14 @@ async function resolveSeatLayoutId(vendorId, seatLayoutId) {
     }
 
     const newLayoutId = await withTransaction(async (client) => {
-      // Buat seat_layout baru untuk vendor
       const r1 = await client.query(
         `INSERT INTO seat_layouts
            (vendor_id, name, total_seats, grid_rows, grid_cols, created_at)
          VALUES (?, ?, ?, ?, ?, NOW())`,
-        [
-          vendorId,
-          `${tpl.name} (auto)`,
-          tpl.total_seats,
-          tpl.row_count || 0,
-          tpl.cols || 0,
-        ]
+        [vendorId, `${tpl.name} (auto)`, tpl.total_seats, tpl.row_count || 0, tpl.cols || 0]
       );
       const layoutId = r1.insertId;
 
-      // Insert cells dari grid
       const cells = [];
       for (const row of (grid || [])) {
         const rowNo = Number(row.row) || 1;
@@ -144,48 +134,38 @@ async function resolveSeatLayoutId(vendorId, seatLayoutId) {
         for (let c = 0; c < rowCells.length; c++) {
           const cell = rowCells[c];
           const colNo = c + 1;
-
-          if (cell === 'driver') {
-            cells.push([layoutId, rowNo, colNo, 'driver', null]);
-          } else if (cell === 'empty' || cell == null || cell === '') {
-            cells.push([layoutId, rowNo, colNo, 'empty', null]);
-          } else {
-            cells.push([layoutId, rowNo, colNo, 'seat', String(cell)]);
-          }
+          if (cell === 'driver') cells.push([layoutId, rowNo, colNo, 'driver', null]);
+          else if (cell === 'empty' || cell == null || cell === '') cells.push([layoutId, rowNo, colNo, 'empty', null]);
+          else cells.push([layoutId, rowNo, colNo, 'seat', String(cell)]);
         }
       }
 
-      // ✅ FIX: MySQL tidak support "VALUES ?" — pakai placeholder manual
       if (cells.length) {
         const placeholders = cells.map(() => '(?, ?, ?, ?, ?)').join(', ');
-        const flat = cells.flat();
         await client.query(
           `INSERT INTO seat_layout_cells
              (layout_id, row_no, col_no, cell_type, seat_number)
            VALUES ${placeholders}`,
-          flat
+          cells.flat()
         );
       }
 
       return layoutId;
     });
 
-    return newLayoutId;
+    return { layoutId: newLayoutId, templateId: tpl.id };
   }
 
-  // 2. Cek apakah milik vendor
   const { rows: ownRows } = await query(
     `SELECT id FROM seat_layouts WHERE id = ? AND vendor_id = ? LIMIT 1`,
     [seatLayoutId, vendorId]
   );
-  if (ownRows.length) return seatLayoutId;
+  if (ownRows.length) return { layoutId: ownRows[0].id, templateId: null };
 
-  // 3. Tidak ketemu
-  const err = new Error('Denah kursi tidak ditemukan (bukan template sistem & bukan milik vendor)');
+  const err = new Error('Denah kursi tidak ditemukan');
   err.status = 404;
   throw err;
 }
-
 /**
  * Vendor upload armada baru.
  */
@@ -217,9 +197,13 @@ const createVehicle = asyncHandler(async (req, res) => {
   const facilityIds = Array.isArray(rawFac) ? rawFac : [rawFac];
 
   // Resolve layout (auto-copy template kalau perlu)
+  // Resolve layout (auto-copy template kalau perlu)
   let finalLayoutId;
+  let finalTemplateId = null;
   try {
-    finalLayoutId = await resolveSeatLayoutId(vendorId, Number(seat_layout_id));
+    const resolved = await resolveSeatLayoutId(vendorId, Number(seat_layout_id));
+    finalLayoutId = resolved.layoutId;
+    finalTemplateId = resolved.templateId;
   } catch (e) {
     cleanupFiles();
     return res.status(e.status || 500).json({ success: false, message: e.message });
@@ -229,12 +213,12 @@ const createVehicle = asyncHandler(async (req, res) => {
     // 1. Insert vehicle
     const r = await client.query(
       `INSERT INTO vehicles
-         (vendor_id, seat_layout_id, name, class_name, vehicle_type,
+         (vendor_id, seat_layout_id, seat_layout_template_id, name, class_name, vehicle_type,
           plate_number, brand, model, year, seat_arrangement,
           capacity, is_active, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
-        vendorId, finalLayoutId, name, class_name, vehicle_type,
+        vendorId, finalLayoutId, finalTemplateId, name, class_name, vehicle_type,
         plate_number || null, brand || null, model || null,
         year ? Number(year) : null, seat_arrangement || null,
         Number(capacity), is_active === '0' || is_active === 0 ? 0 : 1,
@@ -307,12 +291,14 @@ async function getVehicleFullById(vehicleId) {
   vehicle.facility_ids = facilities.map(f => f.id);
 
   // Seat layout
+  // Seat layout
   const { rows: layout } = await query(
     `SELECT id, name, total_seats, grid_rows, grid_cols
-       FROM seat_layouts WHERE id = ? LIMIT 1`,
+         FROM seat_layouts WHERE id = ? LIMIT 1`,
     [vehicle.seat_layout_id]
   );
   vehicle.seat_layout = layout[0] || null;
+  vehicle.seat_layout_template_id = vehicle.seat_layout_template_id || null;
 
   return vehicle;
 }
@@ -362,10 +348,14 @@ const updateVehicle = asyncHandler(async (req, res) => {
   }
 
   // Kalau seat_layout_id diubah → resolve ulang
+  // Kalau seat_layout_id diubah → resolve ulang
   let finalLayoutId = null;
+  let finalTemplateId = null;
   if (req.body.seat_layout_id !== undefined && req.body.seat_layout_id !== '') {
     try {
-      finalLayoutId = await resolveSeatLayoutId(vendorId, Number(req.body.seat_layout_id));
+      const resolved = await resolveSeatLayoutId(vendorId, Number(req.body.seat_layout_id));
+      finalLayoutId = resolved.layoutId;
+      finalTemplateId = resolved.templateId;
     } catch (e) {
       if (req.files) req.files.forEach(f => { try { fs.unlinkSync(f.path); } catch (ex) { } });
       return res.status(e.status || 500).json({ success: false, message: e.message });
@@ -384,6 +374,8 @@ const updateVehicle = asyncHandler(async (req, res) => {
   if (finalLayoutId !== null) {
     sets.push('seat_layout_id = ?');
     values.push(finalLayoutId);
+    sets.push('seat_layout_template_id = ?');
+    values.push(finalTemplateId);
   }
 
   for (const key of allowed) {
