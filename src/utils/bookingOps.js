@@ -54,9 +54,12 @@ async function holdSeats(c, scheduleId, seatNumbers, bookingId) {
 }
 
 async function releaseSeats(c, bookingId, scheduleId) {
+    // ✅ FIX: hanya lepas kursi yang masih 'held'.
+    // Kursi yang sudah 'booked' (sudah dibayar) TIDAK boleh dilepas —
+    // jika dilepas akan menyebabkan double booking.
     await c.query(
         `UPDATE schedule_seats SET status = 'available', held_until = NULL, held_by_booking_id = NULL
-      WHERE held_by_booking_id = ? AND status IN ('held','booked')`, [bookingId]);
+      WHERE held_by_booking_id = ? AND status = 'held'`, [bookingId]);
     await syncSeatCount(c, scheduleId);
 }
 

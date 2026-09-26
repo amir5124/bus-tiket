@@ -68,9 +68,6 @@ const BANK_TO_CODE = {
   '028': 'ocbc_va', '016': 'maybank_va', '019': 'panin_va',
 };
 
-// ❌ SUDAH TIDAK ADA fetchJagelSaldo & adjustJagelSaldo DI SINI
-// (sudah diimpor dari ../utils/jagel di atas)
-
 // =====================================================================
 // KIRIM INVOICE VIA EMAIL
 // =====================================================================
@@ -531,6 +528,32 @@ async function coinConfirmInternal({ user, amount, booking_code, order_no, refer
     [booking.id]
   );
 
+  // ============================================================
+  // ✅ FIX: kunci kursi jadi 'booked' agar tidak dilepas oleh
+  //    expiry job / releaseSeats. (bug double booking)
+  // ============================================================
+  try {
+    const r1 = await query(
+      `UPDATE schedule_seats
+          SET status = 'booked', held_until = NULL
+        WHERE held_by_booking_id = ? AND status = 'held'`,
+      [booking.id]
+    );
+    console.log(`[COIN-CONFIRM] ✅ ${r1.affectedRows || 0} kursi di-booked untuk booking ${booking.id}`);
+
+    await query(
+      `UPDATE schedules s
+          SET s.seats_available = (
+            SELECT COUNT(*) FROM schedule_seats
+             WHERE schedule_id = s.id AND status = 'available'
+          )
+        WHERE s.id = ?`,
+      [booking.schedule_id]
+    );
+  } catch (e) {
+    console.error(`[COIN-CONFIRM] ❌ gagal update kursi booking ${booking.id}:`, e.message);
+  }
+
   console.log(`[COIN-CONFIRM] ✅ Booking ${booking_code} paid via coin (user=${user})`);
 
   try {
@@ -590,7 +613,7 @@ const markPaid = async (partner_reff) => {
   const { rows } = await query(
     `SELECT p.booking_id, p.amount, p.status AS payment_status,
             b.status AS booking_status, b.booking_code, b.order_no,
-            b.total_amount, b.ticket_subtotal, b.vendor_id,
+            b.total_amount, b.ticket_subtotal, b.vendor_id, b.schedule_id,
             v.name AS vendor_name, v.contact_email AS vendor_email, v.contact_phone AS vendor_phone,
             v.payment_system, v.commission_percent, v.markup_percent,
             u.username AS vendor_owner_username,
@@ -670,6 +693,36 @@ const markPaid = async (partner_reff) => {
       WHERE id = ? AND status = 'pending_payment'`,
     [p.payment_system, commissionAmount, platformAmount, vendorAmount, markupAmount, p.booking_id]
   );
+
+  // ============================================================
+  // ✅ FIX BUG DOUBLE BOOKING
+  // Kunci kursi jadi 'booked' permanen, jangan biarkan expiry job
+  // / releaseSeats melepasnya kembali ke 'available'.
+  // ============================================================
+  try {
+    const r1 = await query(
+      `UPDATE schedule_seats
+          SET status = 'booked', held_until = NULL
+        WHERE held_by_booking_id = ? AND status = 'held'`,
+      [p.booking_id]
+    );
+    console.log(`[markPaid] ✅ ${r1.affectedRows || 0} kursi di-booked untuk booking ${p.booking_id}`);
+
+    // Sync seats_available di schedules
+    await query(
+      `UPDATE schedules s
+          SET s.seats_available = (
+            SELECT COUNT(*) FROM schedule_seats
+             WHERE schedule_id = s.id AND status = 'available'
+          )
+        WHERE s.id = ?`,
+      [p.schedule_id]
+    );
+    console.log(`[markPaid] ✅ seats_available di-sync untuk schedule ${p.schedule_id}`);
+  } catch (e) {
+    console.error(`[markPaid] ❌ gagal update kursi booking ${p.booking_id}:`, e.message);
+    // Lanjut — booking tetap paid, kursi tidak hilang
+  }
 
   if (p.payment_system === 'topup') {
     if (p.vendor_owner_username) {
@@ -857,5 +910,5 @@ module.exports = {
   checkCoinBalance,
   payWithCoin,
   getVendorNotifications,
-  adjustJagelSaldo,   // re-export dari utils/jagel
+  adjustJagelSaldo,
 };
