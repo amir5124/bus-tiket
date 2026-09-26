@@ -37,9 +37,6 @@ const listVendorSchedules = asyncHandler(async (req, res) => {
 
 /**
  * Hitung arrival_at dari departure_at + duration_minutes.
- * @param {string} departureAt - 'YYYY-MM-DD HH:mm:ss'
- * @param {number} durationMin - menit (min 30, max 1440)
- * @returns {string} 'YYYY-MM-DD HH:mm:ss'
  */
 function computeArrival(departureAt, durationMin) {
     const dur = Math.max(30, Math.min(Number(durationMin) || 180, 1440));
@@ -51,15 +48,6 @@ function computeArrival(departureAt, durationMin) {
 
 /**
  * POST /api/vendors/:vendorId/schedules
- * Body: { ..., departure_at, duration_minutes, seat_config? }
- *
- * seat_config (opsional, untuk override denah kursi):
- *   - { type: 'layout' }                      → pakai seat_layout_id kendaraan (default)
- *   - { type: 'custom', seats: ['1A','1B'] }  → custom seat numbers
- *   - { type: 'custom', rows: [               → custom grid (lebih detail)
- *       { row: 1, cells: ['1A', '1B'] },
- *       { row: 2, cells: ['2A', '2B'] },
- *     ]}
  */
 const createVendorSchedule = asyncHandler(async (req, res) => {
     const vendorId = Number(req.vendorId);
@@ -139,7 +127,6 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
     if (!vehRows.length) {
         return res.status(404).json({ success: false, message: 'Armada tidak ditemukan / nonaktif' });
     }
-    const vehicle = vehRows[0];
 
     // 7. Hitung arrival_at
     let finalArrival;
@@ -150,23 +137,18 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
     }
 
     // 8. Tentukan seat list (untuk seed schedule_seats)
-    //    Prioritas: seat_config custom → seat_layout kendaraan
     let seatList = [];
 
     if (seat_config && seat_config.type === 'custom') {
-        // Custom dari rows
         if (Array.isArray(seat_config.rows) && seat_config.rows.length) {
             for (const r of seat_config.rows) {
                 if (!Array.isArray(r.cells)) continue;
                 for (const cell of r.cells) {
-                    // Skip cell yang bukan seat (kosong, driver)
                     if (cell == null || cell === '' || cell === 'driver' || cell === 'empty') continue;
                     seatList.push(String(cell));
                 }
             }
-        }
-        // Custom dari seats array langsung
-        else if (Array.isArray(seat_config.seats) && seat_config.seats.length) {
+        } else if (Array.isArray(seat_config.seats) && seat_config.seats.length) {
             seatList = seat_config.seats.map(String).filter(Boolean);
         }
 
@@ -176,8 +158,36 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
                 message: 'seat_config custom harus berisi minimal 1 kursi',
             });
         }
+    } else if (seat_config && seat_config.type === 'template' && seat_config.template_id) {
+        // ✅ MODE TEMPLATE: ambil grid dari seat_layout_templates
+        const { rows: tplRows } = await query(
+            `SELECT grid FROM seat_layout_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+            [seat_config.template_id]
+        );
+        if (!tplRows.length) {
+            return res.status(404).json({
+                success: false,
+                message: 'Template kursi tidak ditemukan',
+            });
+        }
+        let grid = tplRows[0].grid;
+        if (typeof grid === 'string') {
+            try { grid = JSON.parse(grid); } catch (e) { grid = []; }
+        }
+        for (const row of (grid || [])) {
+            for (const cell of (row.cells || [])) {
+                if (cell == null || cell === '' || cell === 'driver' || cell === 'empty') continue;
+                seatList.push(String(cell));
+            }
+        }
+        if (!seatList.length) {
+            return res.status(400).json({
+                success: false,
+                message: 'Template kursi kosong / tidak valid',
+            });
+        }
     } else {
-        // Pakai seat_layout dari kendaraan (perilaku default)
+        // Pakai seat_layout dari kendaraan (default)
         const { rows: layoutRows } = await query(
             `SELECT c.seat_number FROM vehicles v
                JOIN seat_layout_cells c
@@ -223,12 +233,15 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
     );
     const scheduleId = result.insertId;
 
-    // 10. Seed kursi (dari seatList yang sudah ditentukan)
-    const values = seatList.map(sn => [scheduleId, sn]);
-    await query(
-        `INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ?`,
-        [values]
-    );
+    // ✅ FIX: MySQL tidak support "VALUES ?" — pakai placeholder manual
+    if (seatList.length) {
+        const placeholders = seatList.map(() => '(?, ?)').join(', ');
+        const flat = seatList.flatMap(sn => [scheduleId, sn]);
+        await query(
+            `INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ${placeholders}`,
+            flat
+        );
+    }
 
     // 11. Update counter
     await query(
@@ -248,7 +261,9 @@ const createVendorSchedule = asyncHandler(async (req, res) => {
             price_customer: priceJual,
             markup_amount: markupAmount,
             seat_count: seatList.length,
-            seat_source: seat_config?.type === 'custom' ? 'custom' : 'vehicle_layout',
+            seat_source: seat_config?.type === 'custom' ? 'custom'
+                : seat_config?.type === 'template' ? 'template'
+                    : 'vehicle_layout',
         },
     });
 });
@@ -264,7 +279,6 @@ const updateVendorSchedule = asyncHandler(async (req, res) => {
         'insurance_available', 'insurance_product_id', 'direction', 'is_popular',
     ];
 
-    // Ambil existing dulu untuk recompute arrival_at
     const { rows: existing } = await query(
         `SELECT departure_at, arrival_at, duration_minutes FROM schedules
           WHERE id = ? AND vendor_id = ? LIMIT 1`,
@@ -277,7 +291,6 @@ const updateVendorSchedule = asyncHandler(async (req, res) => {
     const sets = [];
     const values = [];
 
-    // Kalau departure_at atau duration_minutes berubah → recompute arrival_at
     const depChanged = req.body.departure_at !== undefined;
     const durChanged = req.body.duration_minutes !== undefined;
 
@@ -292,19 +305,16 @@ const updateVendorSchedule = asyncHandler(async (req, res) => {
             return res.status(400).json({ success: false, message: e.message });
         }
 
-        // Set duration_minutes kalau berubah
         if (durChanged) {
             sets.push('duration_minutes = ?');
             values.push(Math.max(30, Math.min(newDur, 1440)));
         }
 
-        // Set arrival_at (selalu recompute)
         sets.push('arrival_at = ?');
         values.push(computedArrival);
     }
 
     for (const key of allowed) {
-        // Skip departure_at & duration_minutes karena sudah di-handle di atas
         if (key === 'departure_at' || key === 'duration_minutes') continue;
         if (req.body[key] !== undefined) {
             sets.push(`${key} = ?`);
@@ -312,7 +322,6 @@ const updateVendorSchedule = asyncHandler(async (req, res) => {
         }
     }
 
-    // Handle departure_at (setelah arrival_at & duration_minutes)
     if (depChanged) {
         sets.push('departure_at = ?');
         values.push(req.body.departure_at);
@@ -411,12 +420,7 @@ const publishVendorSchedule = asyncHandler(async (req, res) => {
 });
 
 /* =====================================================================
- * CLONE SCHEDULE — duplikat jadwal lama ke tanggal baru
- * POST /api/vendors/:vendorId/schedules/:id/clone
- * Body: { departure_at: '2026-09-27 08:00:00', duration_minutes?: 180 }
- *
- * Semua config dari jadwal sumber disalin. Kursi di-seed ulang
- * (fresh, semua available).
+ * CLONE SCHEDULE
  * ===================================================================== */
 const cloneVendorSchedule = asyncHandler(async (req, res) => {
     const vendorId = Number(req.vendorId);
@@ -430,7 +434,6 @@ const cloneVendorSchedule = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Format departure_at: YYYY-MM-DD HH:mm' });
     }
 
-    // 1. Ambil jadwal sumber
     const { rows: srcRows } = await query(
         `SELECT * FROM schedules WHERE id = ? AND vendor_id = ? LIMIT 1`,
         [srcId, vendorId]
@@ -440,7 +443,6 @@ const cloneVendorSchedule = asyncHandler(async (req, res) => {
     }
     const src = srcRows[0];
 
-    // 2. Cek vendor
     const { rows: vendorRows } = await query(
         `SELECT id, status, payment_system, topup_active_until FROM vendors WHERE id = ? LIMIT 1`,
         [vendorId]
@@ -460,14 +462,9 @@ const cloneVendorSchedule = asyncHandler(async (req, res) => {
         }
     }
 
-    // 3. Tentukan durasi & arrival_at
-    //    Prioritas: duration_minutes dari body → duration_minutes dari src → fallback hitung dari selisih src
     let durMin = Number(duration_minutes);
+    if (!Number.isFinite(durMin) || durMin <= 0) durMin = Number(src.duration_minutes);
     if (!Number.isFinite(durMin) || durMin <= 0) {
-        durMin = Number(src.duration_minutes);
-    }
-    if (!Number.isFinite(durMin) || durMin <= 0) {
-        // Fallback: hitung dari selisih arrival - departure src
         durMin = Math.round(
             (new Date(String(src.arrival_at).replace(' ', 'T')) -
                 new Date(String(src.departure_at).replace(' ', 'T'))) / 60000
@@ -484,7 +481,6 @@ const cloneVendorSchedule = asyncHandler(async (req, res) => {
 
     const newCode = `SCH-${vendorId}-${Date.now()}`;
 
-    // 4. Insert jadwal baru
     const insertResult = await query(
         `INSERT INTO schedules
            (schedule_code, vendor_id, route_id, vehicle_id, direction,
@@ -506,18 +502,19 @@ const cloneVendorSchedule = asyncHandler(async (req, res) => {
     );
     const newId = insertResult.insertId;
 
-    // 5. Copy seat dari jadwal sumber (seat_number-nya saja)
-    //    Biar konsisten kalau ada custom seat di jadwal sumber
+    // Copy seat dari jadwal sumber
     const { rows: srcSeats } = await query(
         `SELECT seat_number FROM schedule_seats WHERE schedule_id = ? ORDER BY id`,
         [srcId]
     );
 
     if (srcSeats.length) {
-        const values = srcSeats.map(r => [newId, r.seat_number]);
+        // ✅ FIX: placeholder manual
+        const placeholders = srcSeats.map(() => '(?, ?)').join(', ');
+        const flat = srcSeats.flatMap(r => [newId, r.seat_number]);
         await query(
-            `INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ?`,
-            [values]
+            `INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ${placeholders}`,
+            flat
         );
     } else {
         // Fallback: pakai seat_layout kendaraan
@@ -532,7 +529,7 @@ const cloneVendorSchedule = asyncHandler(async (req, res) => {
         );
     }
 
-    // 6. Update counter
+    // Update counter
     await query(
         `UPDATE schedules s
             SET s.seats_total = (SELECT COUNT(*) FROM schedule_seats WHERE schedule_id = s.id),
@@ -541,7 +538,7 @@ const cloneVendorSchedule = asyncHandler(async (req, res) => {
         [newId]
     );
 
-    // 7. Copy T&C
+    // Copy T&C
     try {
         await query(
             `INSERT INTO schedule_terms (schedule_id, section, items, sort_order)
