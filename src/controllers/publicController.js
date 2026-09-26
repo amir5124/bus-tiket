@@ -1,13 +1,23 @@
 const { query } = require('../config/db');
 const { asyncHandler, ok, getPagination, buildMeta } = require('../utils/helpers');
 
-/** Daftar kota (untuk dropdown asal/tujuan) */
+// ✅ WHITELIST RUTE PUBLIK — hanya IKN ↔ Balikpapan (pakai NAMA kota)
+const IKN_NAME = 'IKN (Ibu Kota Nusantara)';
+const BPN_NAME = 'Balikpapan';
+const ALLOWED_ROUTES = [
+  { origin: IKN_NAME, destination: BPN_NAME },
+  { origin: BPN_NAME, destination: IKN_NAME },
+];
+const isAllowedRoute = (originCity, destCity) =>
+  ALLOWED_ROUTES.some(r => r.origin === originCity && r.destination === destCity);
+
+/** Daftar kota */
 const listCities = asyncHandler(async (req, res) => {
   const { rows } = await query(`SELECT * FROM cities ORDER BY is_popular DESC, sort_order, name`);
   ok(res, rows);
 });
 
-/** Daftar metode pembayaran aktif (untuk halaman checkout) */
+/** Daftar metode pembayaran aktif */
 const listPaymentMethods = asyncHandler(async (req, res) => {
   const { rows } = await query(
     `SELECT id, code, name, type, icon, fee_flat, sort_order
@@ -18,16 +28,15 @@ const listPaymentMethods = asyncHandler(async (req, res) => {
   ok(res, rows);
 });
 
-/** Daftar fasilitas master (untuk filter pencarian) */
+/** Daftar fasilitas master */
 const listFacilities = asyncHandler(async (req, res) => {
   const { rows } = await query(`SELECT * FROM facilities ORDER BY name`);
   ok(res, rows);
 });
 
 /**
- * Pencarian jadwal (halaman hasil pencarian tiket).
- * query: origin_city_id, destination_city_id, depart_date (YYYY-MM-DD),
- *        seats, vehicle_type, sort=price_asc|price_desc|earliest
+ * Pencarian jadwal — hanya rute IKN ↔ Balikpapan.
+ * Query: origin_city_id, destination_city_id, depart_date, seats, vehicle_type, sort
  */
 const searchSchedules = asyncHandler(async (req, res) => {
   const { page, limit, offset } = getPagination(req);
@@ -43,12 +52,25 @@ const searchSchedules = asyncHandler(async (req, res) => {
     });
   }
 
+  // ✅ Cek whitelist rute: konversi ID → nama dulu, baru bandingkan
+  const { rows: cityRows } = await query(
+    `SELECT id, name FROM cities WHERE id IN ($1, $2)`,
+    [origin_city_id, destination_city_id]
+  );
+  const originCityName = cityRows.find(c => String(c.id) === String(origin_city_id))?.name;
+  const destCityName = cityRows.find(c => String(c.id) === String(destination_city_id))?.name;
+
+  if (!originCityName || !destCityName || !isAllowedRoute(originCityName, destCityName)) {
+    // Rute tidak diizinkan → balas kosong (bukan error)
+    return ok(res, [], buildMeta(page, limit, 0));
+  }
+
   const conds = [
-    `s.origin_city = (SELECT name FROM cities WHERE id = $1)`,
-    `s.destination_city = (SELECT name FROM cities WHERE id = $2)`,
+    `s.origin_city = $1`,
+    `s.destination_city = $2`,
     `DATE(s.departure_at) = $3`,
   ];
-  const params = [origin_city_id, destination_city_id, depart_date];
+  const params = [originCityName, destCityName, depart_date];
   let i = 4;
 
   if (seats) { conds.push(`s.seats_available >= $${i++}`); params.push(Number(seats)); }
@@ -61,7 +83,7 @@ const searchSchedules = asyncHandler(async (req, res) => {
     earliest: 's.departure_at ASC',
   }[sort] || 's.departure_at ASC';
 
-  // Log pencarian untuk analitik admin (best-effort, tidak menggagalkan request)
+  // Log pencarian (best-effort)
   query(
     `INSERT INTO search_logs(user_id, origin_city_id, destination_city_id, depart_date, seats)
      VALUES ($1,$2,$3,$4,$5)`,
@@ -79,46 +101,69 @@ const searchSchedules = asyncHandler(async (req, res) => {
   ok(res, rows, buildMeta(page, limit, countRows[0].count));
 });
 
-/** Detail 1 jadwal: armada lengkap, fasilitas, denah kursi, kursi terisi, T&C */
+/** Detail 1 jadwal — hanya untuk rute yang diizinkan */
 const getScheduleDetail = asyncHandler(async (req, res) => {
-  const { rows } = await query(`SELECT * FROM v_schedule_search WHERE schedule_id = $1`, [req.params.id]);
-  if (!rows.length) return res.status(404).json({ success: false, message: 'Jadwal tidak ditemukan' });
+  const { rows } = await query(
+    `SELECT * FROM v_schedule_search WHERE schedule_id = $1`,
+    [req.params.id]
+  );
+  if (!rows.length) {
+    return res.status(404).json({ success: false, message: 'Jadwal tidak ditemukan' });
+  }
   const schedule = rows[0];
 
+  // ✅ Cek whitelist rute pakai nama kota
+  if (!isAllowedRoute(schedule.origin_city, schedule.destination_city)) {
+    return res.status(404).json({ success: false, message: 'Jadwal tidak ditemukan' });
+  }
+
   const { rows: scheduleFull } = await query(
-    `SELECT s.*, veh.id AS vehicle_id FROM schedules s JOIN vehicles veh ON veh.id = s.vehicle_id WHERE s.id = $1`,
+    `SELECT s.*, veh.id AS vehicle_id
+       FROM schedules s
+       JOIN vehicles veh ON veh.id = s.vehicle_id
+      WHERE s.id = $1`,
     [req.params.id]
   );
   const vehicleId = scheduleFull[0].vehicle_id;
 
   const { rows: facilities } = await query(
-    `SELECT f.id, f.code, f.name, f.icon FROM vehicle_facilities vf
-     JOIN facilities f ON f.id = vf.facility_id WHERE vf.vehicle_id = $1`,
+    `SELECT f.id, f.code, f.name, f.icon
+       FROM vehicle_facilities vf
+       JOIN facilities f ON f.id = vf.facility_id
+      WHERE vf.vehicle_id = $1`,
     [vehicleId]
   );
   const { rows: photos } = await query(
-    `SELECT url, kind, is_cover FROM vehicle_photos WHERE vehicle_id = $1 ORDER BY sort_order`,
+    `SELECT url, kind, is_cover FROM vehicle_photos
+      WHERE vehicle_id = $1 ORDER BY sort_order`,
     [vehicleId]
   );
   const { rows: seats } = await query(
-    `SELECT seat_number, status FROM schedule_seats WHERE schedule_id = $1 ORDER BY seat_number`,
+    `SELECT seat_number, status FROM schedule_seats
+      WHERE schedule_id = $1 ORDER BY seat_number`,
     [req.params.id]
   );
   const { rows: seatMap } = await query(
     `SELECT slc.row_no, slc.col_no, slc.cell_type, slc.seat_number
-     FROM schedules s JOIN vehicles v ON v.id = s.vehicle_id
-     JOIN seat_layout_cells slc ON slc.layout_id = v.seat_layout_id
-     WHERE s.id = $1 ORDER BY slc.row_no, slc.col_no`,
+       FROM schedules s
+       JOIN vehicles v ON v.id = s.vehicle_id
+       JOIN seat_layout_cells slc ON slc.layout_id = v.seat_layout_id
+      WHERE s.id = $1
+      ORDER BY slc.row_no, slc.col_no`,
     [req.params.id]
   );
   const { rows: terms } = await query(
-    `SELECT section, items, sort_order FROM schedule_terms WHERE schedule_id = $1 ORDER BY sort_order`,
+    `SELECT section, items, sort_order FROM schedule_terms
+      WHERE schedule_id = $1 ORDER BY sort_order`,
     [req.params.id]
   );
+
   let insurance = null;
   if (schedule.insurance_available) {
     const { rows: ins } = await query(
-      `SELECT ip.* FROM schedules s JOIN insurance_products ip ON ip.id = s.insurance_product_id WHERE s.id = $1`,
+      `SELECT ip.* FROM schedules s
+        JOIN insurance_products ip ON ip.id = s.insurance_product_id
+       WHERE s.id = $1`,
       [req.params.id]
     );
     insurance = ins[0] || null;
@@ -127,18 +172,24 @@ const getScheduleDetail = asyncHandler(async (req, res) => {
   ok(res, { ...schedule, facilities, photos, seats, seat_map: seatMap, terms, insurance });
 });
 
-/** Profil publik vendor (untuk halaman "tentang vendor") */
+/** Profil publik vendor */
 const getVendorPublicProfile = asyncHandler(async (req, res) => {
   const { rows } = await query(
-    `SELECT vendor_id, code, vendor_name, rating_avg FROM v_vendor_profile WHERE vendor_id = $1 AND status = 'active'`,
+    `SELECT vendor_id, code, vendor_name, rating_avg
+       FROM v_vendor_profile
+      WHERE vendor_id = $1 AND status = 'active'`,
     [req.params.id]
   );
-  if (!rows.length) return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  if (!rows.length) {
+    return res.status(404).json({ success: false, message: 'Vendor tidak ditemukan' });
+  }
 
   const { rows: vehicles } = await query(
     `SELECT v.id, v.name, v.class_name, v.vehicle_type,
             (SELECT url FROM vehicle_photos WHERE vehicle_id = v.id AND is_cover LIMIT 1) AS cover_photo
-     FROM vehicles v WHERE v.vendor_id = $1 AND v.is_active ORDER BY v.name`,
+       FROM vehicles v
+      WHERE v.vendor_id = $1 AND v.is_active
+      ORDER BY v.name`,
     [req.params.id]
   );
 
