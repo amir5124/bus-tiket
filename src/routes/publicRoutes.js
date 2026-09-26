@@ -1,5 +1,7 @@
 const router = require('express').Router();
 const publicCtrl = require('../controllers/publicController');
+const seatTemplateCtrl = require('../controllers/seatTemplateController');
+
 const { optionalAuth } = require('../middleware/auth');
 
 // GET /api/public/cities
@@ -7,6 +9,8 @@ router.get('/cities', publicCtrl.listCities);
 
 // GET /api/public/facilities
 router.get('/facilities', publicCtrl.listFacilities);
+router.get('/seat-templates', seatTemplateCtrl.listSeatTemplates);
+router.get('/seat-templates/:code', seatTemplateCtrl.getSeatTemplate);
 
 // GET /api/public/schedules/search?origin_city_id=&destination_city_id=&depart_date=&seats=&vehicle_type=&sort=
 router.get('/schedules/search', optionalAuth, publicCtrl.searchSchedules);

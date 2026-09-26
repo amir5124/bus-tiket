@@ -6,14 +6,16 @@ const vendorCtrl = require('../controllers/vendorController');
 const vehicleCtrl = require('../controllers/vehicleController');
 const vendorRouteCtrl = require('../controllers/vendorRouteController');
 const vendorScheduleCtrl = require('../controllers/vendorScheduleController');
+const templateCtrl = require('../controllers/scheduleTemplateController');
+
 
 /* =====================================================================
- * PUBLIC (tanpa auth) — dipanggil LinkQu
+ * PUBLIC — LinkQu callback
  * ===================================================================== */
 router.post('/topup/callback', vendorCtrl.topupCallback);
 
 /* =====================================================================
- * AUTH — semua di bawah ini butuh user
+ * AUTH
  * ===================================================================== */
 router.use(requireAuth);
 
@@ -37,7 +39,7 @@ router.post('/:vendorId/topup/:topupId/confirm', requireVendorMember('owner'), v
 router.get('/:vendorId/facilities', requireVendorMember('staff'), vehicleCtrl.listFacilities);
 
 /* =====================================================================
- * DENAH KURSI
+ * DENAH KURSI (layout master)
  * ===================================================================== */
 router.post('/:vendorId/seat-layouts',
   requireVendorMember('manager'), requireActiveVendor(), vehicleCtrl.createSeatLayout);
@@ -66,6 +68,10 @@ router.delete('/:vendorId/vehicles/:id/photos/:photoId',
   requireVendorMember('manager'), requireActiveVendor(), vehicleCtrl.deleteVehiclePhoto);
 router.delete('/:vendorId/vehicles/:id',
   requireVendorMember('owner'), requireActiveVendor(), vehicleCtrl.deactivateVehicle);
+
+/* =====================================================================
+ * STOPS
+ * ===================================================================== */
 router.get('/:vendorId/stops', requireVendorMember('staff'), vendorCtrl.listStops);
 
 /* =====================================================================
@@ -79,11 +85,11 @@ router.put('/:vendorId/routes/:id',
 router.delete('/:vendorId/routes/:id',
   requireVendorMember('manager'), requireActiveVendor(), vendorRouteCtrl.deleteVendorRoute);
 
-
 /* =====================================================================
  * JADWAL
  * ===================================================================== */
-router.get('/:vendorId/schedules', requireVendorMember('staff'), vendorScheduleCtrl.listVendorSchedules);
+router.get('/:vendorId/schedules',
+  requireVendorMember('staff'), vendorScheduleCtrl.listVendorSchedules);
 router.post('/:vendorId/schedules',
   requireVendorMember('manager'), requireActiveVendor(), vendorScheduleCtrl.createVendorSchedule);
 router.put('/:vendorId/schedules/:id',
@@ -92,5 +98,23 @@ router.delete('/:vendorId/schedules/:id',
   requireVendorMember('manager'), requireActiveVendor(), vendorScheduleCtrl.deleteVendorSchedule);
 router.post('/:vendorId/schedules/:id/publish',
   requireVendorMember('manager'), requireActiveVendor(), vendorScheduleCtrl.publishVendorSchedule);
+
+/* =====================================================================
+* SCHEDULE TEMPLATES (Recurring)
+* ===================================================================== */
+router.get('/:vendorId/schedule-templates',
+  requireVendorMember('staff'), templateCtrl.listTemplates);
+router.post('/:vendorId/schedule-templates',
+  requireVendorMember('manager'), requireActiveVendor(), templateCtrl.createTemplate);
+router.put('/:vendorId/schedule-templates/:id',
+  requireVendorMember('manager'), requireActiveVendor(), templateCtrl.updateTemplate);
+router.delete('/:vendorId/schedule-templates/:id',
+  requireVendorMember('manager'), requireActiveVendor(), templateCtrl.deleteTemplate);
+router.post('/:vendorId/schedule-templates/:id/generate',
+  requireVendorMember('manager'), requireActiveVendor(), templateCtrl.generateFromTemplate);
+
+// ✅ CLONE — ditempatkan setelah route schedules lain, biar tidak bentrok
+router.post('/:vendorId/schedules/:id/clone',
+  requireVendorMember('manager'), requireActiveVendor(), vendorScheduleCtrl.cloneVendorSchedule);
 
 module.exports = router;
