@@ -12,8 +12,19 @@ const isAllowedRoute = (originCity, destCity) =>
   ALLOWED_ROUTES.some(r => r.origin === originCity && r.destination === destCity);
 
 /** Daftar kota */
+/** Daftar kota — hanya yang dipakai di rute whitelist */
 const listCities = asyncHandler(async (req, res) => {
-  const { rows } = await query(`SELECT * FROM cities ORDER BY is_popular DESC, sort_order, name`);
+  // ✅ Whitelist: kota yang muncul = union dari origin & destination
+  const allowedCityNames = [...new Set(
+    ALLOWED_ROUTES.flatMap(r => [r.origin, r.destination])
+  )];
+
+  const { rows } = await query(
+    `SELECT * FROM cities 
+      WHERE name = ANY($1)
+      ORDER BY is_popular DESC, sort_order, name`,
+    [allowedCityNames]
+  );
   ok(res, rows);
 });
 
