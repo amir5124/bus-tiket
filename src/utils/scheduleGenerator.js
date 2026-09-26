@@ -118,8 +118,14 @@ async function generateAll() {
                 );
                 const newId = r.insertId;
 
-                const values = seatList.map(sn => [newId, sn]);
-                await query(`INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ?`, [values]);
+                if (seatList.length) {
+                    const placeholders = seatList.map(() => '(?, ?)').join(', ');
+                    const flat = seatList.flatMap(sn => [newId, sn]);
+                    await query(
+                        `INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ${placeholders}`,
+                        flat
+                    );
+                }
                 await query(
                     `UPDATE schedules s
                         SET s.seats_total = (SELECT COUNT(*) FROM schedule_seats WHERE schedule_id = s.id),

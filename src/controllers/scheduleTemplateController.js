@@ -305,9 +305,14 @@ const generateFromTemplate = asyncHandler(async (req, res) => {
             const newId = r.insertId;
 
             // Seed kursi
-            const values = seatList.map(sn => [newId, sn]);
-            await query(`INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ?`, [values]);
-
+            if (seatList.length) {
+                const placeholders = seatList.map(() => '(?, ?)').join(', ');
+                const flat = seatList.flatMap(sn => [newId, sn]);
+                await query(
+                    `INSERT INTO schedule_seats (schedule_id, seat_number) VALUES ${placeholders}`,
+                    flat
+                );
+            }
             // Update counter
             await query(
                 `UPDATE schedules s
